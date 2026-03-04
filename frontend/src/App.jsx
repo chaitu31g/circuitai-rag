@@ -1,5 +1,6 @@
 import { useState, useCallback } from 'react';
 import axios from 'axios';
+import { API_BASE_URL } from './config';
 import { Database, UploadCloud, MessageSquare } from 'lucide-react';
 import FileUploader from './components/FileUploader';
 import JobStatusPanel from './components/JobStatusPanel';
@@ -23,7 +24,7 @@ function App() {
     const formData = new FormData();
     files.forEach(file => formData.append('files', file));
     try {
-      const response = await axios.post('http://localhost:8000/upload', formData, {
+      const response = await axios.post(`${API_BASE_URL}/upload`, formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
       });
       const newJobIds = response.data.jobs.map(job => job.job_id);

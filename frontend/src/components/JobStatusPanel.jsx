@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import axios from 'axios';
+import { API_BASE_URL } from '../config';
 import {
   RefreshCw, CheckCircle, Clock, Database,
   AlertCircle, FileText, FileJson, Cpu, HardDrive,
@@ -93,7 +94,7 @@ function TerminalBox({ job }) {
     let timer = null;
     const fetch = async () => {
       try {
-        const res = await axios.get(`http://localhost:8000/jobs/${job.job_id}/logs`);
+        const res = await axios.get(`${API_BASE_URL}/jobs/${job.job_id}/logs`);
         setLogs(res.data.logs || []);
       } catch { /* ignore */ }
     };
@@ -201,7 +202,7 @@ export default function JobStatusPanel({ activeJobsIds, onJobCompleted, onActive
 
   const fetchJobs = useCallback(async () => {
     try {
-      const res = await axios.get('http://localhost:8000/jobs');
+      const res = await axios.get(`${API_BASE_URL}/jobs`);
       const newJobs = res.data;
 
       // Detect any job that just flipped to "done" → notify parent to refresh library
@@ -272,7 +273,7 @@ export default function JobStatusPanel({ activeJobsIds, onJobCompleted, onActive
 
   const deleteJob = async (jobId) => {
     try {
-      await axios.delete(`http://localhost:8000/jobs/${jobId}`);
+      await axios.delete(`${API_BASE_URL}/jobs/${jobId}`);
       setJobs(prev => prev.filter(j => j.job_id !== jobId));
     } catch (err) {
       console.error('Failed to delete job', err);
@@ -281,7 +282,7 @@ export default function JobStatusPanel({ activeJobsIds, onJobCompleted, onActive
 
   const deleteAllJobs = async () => {
     try {
-      await axios.delete('http://localhost:8000/jobs');
+      await axios.delete(`${API_BASE_URL}/jobs`);
       fetchJobs();
     } catch (err) {
       console.error('Failed to clear jobs', err);

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import axios from 'axios';
+import { API_BASE_URL } from '../config';
 import { BookOpen, RefreshCw, Cpu, Layers, ChevronRight, Search, Database, ArrowUpDown, ArrowDownAZ, Calendar, HardDrive, Trash2, AlertTriangle, X } from 'lucide-react';
 
 // Colour per chunk type
@@ -92,7 +93,7 @@ export default function LibraryPanel({ refreshTrigger = 0, onComponentsLoaded })
     setLoading(true);
     setError(null);
     try {
-      const res = await axios.get('http://localhost:8000/library');
+      const res = await axios.get(`${API_BASE_URL}/library`);
       setData(res.data);
       onComponentsLoaded?.(res.data.components || []);
     } catch (e) {
@@ -109,7 +110,7 @@ export default function LibraryPanel({ refreshTrigger = 0, onComponentsLoaded })
     setDeleting(prev => new Set([...prev, componentId]));
     setConfirmDelete(null);
     try {
-      await axios.delete(`http://localhost:8000/library/${encodeURIComponent(componentId)}`);
+      await axios.delete(`${API_BASE_URL}/library/${encodeURIComponent(componentId)}`);
       // Optimistically remove from local state — no need to re-fetch
       setData(prev => {
         if (!prev) return prev;

@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import axios from 'axios';
+import { API_BASE_URL } from '../config';
 import {
   Send, Bot, User, Loader2, BookOpen,
   ChevronDown, ChevronUp, Cpu, Zap,
@@ -283,7 +284,7 @@ export default function ChatPanel({ components = [] }) {
     let isDirectMode = false;
 
     try {
-      const response = await fetch('http://localhost:8000/chat/stream', {
+      const response = await fetch(`${API_BASE_URL}/chat/stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -378,7 +379,7 @@ export default function ChatPanel({ components = [] }) {
             const section = (s.section || '').replace(/_/g, ' ');
             return `### 📄 ${comp}\n*Section: ${section}*\n${s.text || ''}\n*Score: ${s.score}*\n`;
           }).join('\n')
-        : `⚠️ **Could not connect to the backend server.**\n\nPlease make sure the backend is running at \`http://localhost:8000\`.\n\n*Error: ${errMsg}*`;
+        : `⚠️ **Could not connect to the backend server.**\n\nPlease make sure the backend is running at \`${API_BASE_URL}\`.\n\n*Error: ${errMsg}*`;
 
       setMessages(prev => {
         const u = [...prev];

@@ -27,8 +27,6 @@ class RAGConfig:
     default_trimmed_chunks: int = 2
     deduplicate_context: bool = True
     temperature: float = 0.2
-    ollama_model: str = "qwen2.5:3b"
-    ollama_url: str = "http://localhost:11434/api/generate"
     request_timeout_s: int = 120
     reranker_model: str = "BAAI/bge-reranker-base"
     reranker_batch_size: int = 16
@@ -120,11 +118,7 @@ class RAGPipeline:
             model_name=self.config.reranker_model,
             batch_size=self.config.reranker_batch_size,
         )
-        self.llm_client = llm_client or OllamaClient(
-            model=self.config.ollama_model,
-            url=self.config.ollama_url,
-            timeout_s=self.config.request_timeout_s,
-        )
+        self.llm_client = llm_client  # None when using external HF LLM (default Colab mode)
         # Future extension point: inject reranker here before context assembly.
 
     def assemble_context(

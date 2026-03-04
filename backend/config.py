@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     # Chroma & AI Model config
     chroma_persist_dir: str = "data/vectordb"
     chroma_collection: str = "datasheets"
-    ollama_model: str = "qwen2.5:7b"
+    hf_model: str = "mistralai/Mistral-7B-Instruct-v0.2"
     embedding_model: str = "BAAI/bge-small-en-v1.5"
     reranker_model: str = "BAAI/bge-reranker-base"
     chroma_server_nofile: int = 4096
