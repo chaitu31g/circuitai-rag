@@ -190,48 +190,70 @@ def chunk_table(table: dict, section_name: str, part_number: str) -> Optional[Ch
 # Figure / image chunking
 # ---------------------------------------------------------------------------
 
+# Keywords in captions / section labels that indicate a graph (not a package drawing)
+_GRAPH_CAPTION_KEYWORDS = {
+    "curve", "characteristic", "vs", "versus", "plot", "graph",
+    "temperature", "current", "voltage", "power", "dissipation",
+    "drain", "gate", "source", "transfer", "output", "soa",
+    "safe operating", "capacitance", "impedance", "frequency",
+    "switching", "thermal", "resistance",
+}
+
+
 def chunk_figure(figure: dict, part_number: str, pdf_path: Optional[Path] = None) -> Optional[Chunk]:
-    # Vision enabled for AWS deployment
     vision = VisionProcessor(model="moondream")
 
-    captions   = figure.get("captions", [])
-    cap_text   = " ".join(
+    captions = figure.get("captions", [])
+    cap_text = " ".join(
         c.get("text", "") if isinstance(c, dict) else str(c)
         for c in captions
     ).strip()
-    
+
     page = (figure.get("prov") or [{}])[0].get("page_no") if figure.get("prov") else None
     bbox = (figure.get("prov") or [{}])[0].get("bbox") if figure.get("prov") else None
 
-    # Pass 1: Identification
-    is_graph = "figure" in cap_text.lower() or "curve" in cap_text.lower() or "characteristic" in cap_text.lower()
-    
-    # Pass 2: Vision Analysis (The "Complete Reading")
+    # Broader is_graph detection — checks caption text against a keyword set
+    # instead of the narrow 3-word list that missed most BSS84P figures.
+    cap_lower = cap_text.lower()
+    is_graph = any(kw in cap_lower for kw in _GRAPH_CAPTION_KEYWORDS)
+
+    # Run moondream vision analysis
     vision_desc = None
-    if vision and page and bbox:
-        logger.info(f"Analysising figure on page {page} for {part_number}...")
+    if page and bbox:
+        logger.info("Analysing figure page=%s is_graph=%s for %s", page, is_graph, part_number)
         vision_desc = vision.extract_and_describe(pdf_path, page, bbox, is_graph=is_graph)
 
+    # Build the chunk text — front-load component name + graph type so that
+    # semantic queries like "BSS84P power dissipation graph" match strongly.
     if vision_desc:
-        text = f"Visual content description for {part_number} (Page {page}):\n{vision_desc}"
         if cap_text:
-            text = f"Figure: {cap_text}\n\nAnalysis:\n{vision_desc}"
+            # e.g. "BSS84P graph — Power dissipation vs ambient temperature:\n<moondream answer>"
+            text = (
+                f"{part_number} graph — {cap_text} (page {page}):\n"
+                f"{vision_desc}"
+            )
+        else:
+            text = (
+                f"{part_number} figure analysis (page {page}):\n"
+                f"{vision_desc}"
+            )
     elif cap_text:
-        text = f"Figure/Graph for {part_number} (Page {page}): {cap_text}"
+        text = f"{part_number} figure — {cap_text} (page {page})"
     else:
-        # Use bbox to make it unique so we don't lose figures without captions
         bbox_str = f"{bbox.get('l', 0):.1f}_{bbox.get('t', 0):.1f}" if bbox else "unknown"
-        text = f"Figure/diagram on page {page} for {part_number} [Ref: {bbox_str}]"
+        text = f"{part_number} figure on page {page} [ref: {bbox_str}]"
 
     return Chunk(
         text=text,
         chunk_type="figure",
         metadata={
             "part_number":  part_number,
+            "chunk_type":   "figure",       # explicit in metadata for ChromaDB filtering
             "section_name": "figures_and_diagrams",
             "page":         page,
+            "is_graph":     is_graph,
             "has_vision":   vision_desc is not None,
-            "bbox":         bbox
+            "caption":      cap_text or "",
         },
     )
 

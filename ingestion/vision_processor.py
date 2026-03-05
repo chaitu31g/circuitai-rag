@@ -110,20 +110,23 @@ class VisionProcessor:
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
-    def describe_image(self, image_bytes: bytes, prompt: str) -> Optional[str]:
-        """Run moondream2 on raw image bytes (PNG/JPEG) and return the answer.
+    def describe_image(
+        self,
+        image_bytes: bytes,
+        prompt: str,
+        is_graph: bool = False,
+    ) -> Optional[str]:
+        """Run moondream2 on raw image bytes and return a description.
+
+        For graph images, three targeted VQA questions are asked and their
+        answers concatenated — moondream2 is a VQA model and responds much
+        better to short focused questions than to long instructions.
 
         Parameters
         ----------
-        image_bytes:
-            Raw bytes from a PyMuPDF pixmap (PNG format).
-        prompt:
-            The question or instruction sent to the vision model.
-
-        Returns
-        -------
-        str or None
-            Model answer, or None if inference failed.
+        image_bytes : raw PNG bytes from PyMuPDF pixmap
+        prompt      : fallback question (used for non-graph figures)
+        is_graph    : True → run the multi-question graph analysis path
         """
         if self.model_name != "moondream" or _model is None:
             return None
@@ -133,13 +136,26 @@ class VisionProcessor:
 
             pil_image = Image.open(BytesIO(image_bytes)).convert("RGB")
 
-            # moondream2 API: encode image → answer question
-            # _model and _tokenizer are module-level singletons; _device is
-            # the same device the model was moved to during loading.
+            # Encode once — all answer_question calls reuse this encoding
             encoded = _model.encode_image(pil_image)
-            answer  = _model.answer_question(encoded, prompt, _tokenizer)
 
-            return answer.strip() if answer else None
+            if is_graph:
+                # Three short, targeted VQA questions produce richer embeddings
+                # than one long instruction for a graph image.
+                questions = [
+                    "What are the x-axis variable and its units in this graph?",
+                    "What are the y-axis variable and its units in this graph?",
+                    "What is the main trend or relationship shown by the curve?",
+                ]
+                parts = []
+                for q in questions:
+                    ans = _model.answer_question(encoded, q, _tokenizer)
+                    if ans and ans.strip():
+                        parts.append(ans.strip())
+                return " ".join(parts) if parts else None
+            else:
+                ans = _model.answer_question(encoded, prompt, _tokenizer)
+                return ans.strip() if ans else None
 
         except Exception as exc:
             logger.error("Vision inference failed: %s", exc, exc_info=True)
@@ -198,21 +214,17 @@ class VisionProcessor:
                 pix         = page.get_pixmap(clip=rect, matrix=fitz.Matrix(2, 2))
                 image_bytes = pix.tobytes("png")
 
+            # For non-graph figures, use a single descriptive question
             prompt = (
-                "Describe this graph from an electronics datasheet. "
-                "Identify the x-axis label and units, the y-axis label and units, "
-                "explain the relationship between the variables, and summarize the "
-                "trend or key data points shown by the curve. Be precise and technical."
-                if is_graph else
-                "This is a diagram or image from an electronics datasheet. "
-                "Describe any components, symbols, pin labels, dimensions, or "
-                "circuit elements shown. Be precise and technical."
+                "Describe this diagram from an electronics datasheet. "
+                "Explain any components, symbols, pin labels, or circuit elements shown."
             )
 
             logger.info(
                 "moondream2 — analysing figure page=%d is_graph=%s", page_no, is_graph
             )
-            return self.describe_image(image_bytes, prompt)
+            # is_graph=True activates the multi-question VQA path in describe_image
+            return self.describe_image(image_bytes, prompt, is_graph=is_graph)
 
         except Exception as exc:
             logger.error("Vision extraction failed: %s", exc, exc_info=True)
