@@ -199,9 +199,10 @@ class VisionProcessor:
                 image_bytes = pix.tobytes("png")
 
             prompt = (
-                "This is a graph or chart from an electronics datasheet. "
-                "State the x-axis label, y-axis label, their units, and the "
-                "key trend or data points. Be precise and technical."
+                "Describe this graph from an electronics datasheet. "
+                "Identify the x-axis label and units, the y-axis label and units, "
+                "explain the relationship between the variables, and summarize the "
+                "trend or key data points shown by the curve. Be precise and technical."
                 if is_graph else
                 "This is a diagram or image from an electronics datasheet. "
                 "Describe any components, symbols, pin labels, dimensions, or "

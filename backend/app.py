@@ -59,8 +59,34 @@ def _keepalive() -> str:
     return ": keep-alive\n\n"
 
 
+# Keywords that signal the user is asking about a graph / figure
+_GRAPH_KEYWORDS = {
+    "graph", "curve", "plot", "chart", "trend", "relationship",
+    "vs", "versus", "function", "characteristic", "waveform",
+    "safe operating", "soa", "power dissipation", "transfer",
+}
+
+
+def _is_graph_query(query: str) -> bool:
+    """Return True if the query is asking about a graph, chart, or characteristic curve."""
+    q = query.lower()
+    return any(kw in q for kw in _GRAPH_KEYWORDS)
+
+
 def _build_retrieval(query: str, top_k: int, component_filter: str | None):
-    """Shared retrieval + context assembly for both endpoints."""
+    """Retrieve context for a user query with graph-aware dual-pass strategy.
+
+    For graph-related queries, an additional ChromaDB pass is performed that
+    filters specifically for figure chunks (chunk_type='figure'). This ensures
+    Moondream-generated graph descriptions are surfaced even when the semantic
+    similarity ranking would otherwise bury them under table/text chunks.
+
+    Retrieval strategy
+    ──────────────────
+    • Always:      top_k semantic/table/text chunks via vector similarity
+    • Graph query: +6 figure chunks filtered by chunk_type='figure'
+    • Merge & dedup by chunk id before context assembly
+    """
     store = ChromaStore(
         persist_dir=Path(config.chroma_persist_dir),
         collection_name=config.chroma_collection,
@@ -71,14 +97,56 @@ def _build_retrieval(query: str, top_k: int, component_filter: str | None):
         embedder=embedder,
         config=RetrieverConfig(top_k=top_k),
     )
-    filters = {"part_number": component_filter} if component_filter else None
-    retrieved = retriever.retrieve(query=query, top_k=top_k, filters=filters)
+
+    # ── Pass 1: standard semantic retrieval ──────────────────────────────────
+    part_filter = {"part_number": component_filter} if component_filter else None
+    retrieved = retriever.retrieve(query=query, top_k=top_k, filters=part_filter)
+
+    # ── Pass 2: figure-specific retrieval (graph queries only) ───────────────
+    if _is_graph_query(query):
+        figure_filter = {"chunk_type": "figure"}
+        if component_filter:
+            # Combine part_number + chunk_type via ChromaDB $and operator
+            figure_filter = {
+                "$and": [
+                    {"part_number": {"$eq": component_filter}},
+                    {"chunk_type":  {"$eq": "figure"}},
+                ]
+            }
+        try:
+            figure_chunks = retriever.retrieve(
+                query=query,
+                top_k=6,
+                filters=figure_filter,
+            )
+            # Merge, keeping Pass-1 order and deduping by chunk id
+            seen_ids = {d.get("id") for d in retrieved}
+            for chunk in figure_chunks:
+                if chunk.get("id") not in seen_ids:
+                    retrieved.append(chunk)
+                    seen_ids.add(chunk.get("id"))
+            logger.info(
+                "Graph query detected — added %d figure chunk(s) to retrieval pool",
+                len(figure_chunks),
+            )
+        except Exception as exc:
+            # Non-fatal: figure pass is best-effort
+            logger.warning("Figure-specific retrieval failed (non-fatal): %s", exc)
+
+    # ── Context assembly ──────────────────────────────────────────────────────
+    # Raise max_context_chunks for graph queries so figure descriptions
+    # aren't trimmed out by the small-LLM budget guard.
+    max_ctx_chunks = 10 if _is_graph_query(query) else 6
 
     pipeline = RAGPipeline(
         retriever=retriever,
-        config=RAGConfig(top_k=top_k, max_context_chars=4000, default_trimmed_chunks=6),
+        config=RAGConfig(
+            top_k=top_k,
+            max_context_chars=6000,
+            default_trimmed_chunks=max_ctx_chunks,
+        ),
     )
-    assembled = pipeline.assemble_context(retrieved, max_context_chunks=6)
+    assembled = pipeline.assemble_context(retrieved, max_context_chunks=max_ctx_chunks)
 
     sources = [
         {
@@ -109,7 +177,7 @@ def health_check():
 class ChatRequest(BaseModel):
     query: str
     component_filter: str | None = None
-    top_k: int = 10
+    top_k: int = 12         # raised from 10 — larger pool improves figure recall
     max_new_tokens: int = 512
     temperature: float = 0.2
 
