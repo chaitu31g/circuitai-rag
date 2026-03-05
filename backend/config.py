@@ -14,13 +14,13 @@ class Settings(BaseSettings):
     pdfs_dir:      str = str(PROJECT_ROOT / "pdfs")
     docling_dir:   str = str(PROJECT_ROOT / "docling_output")
     knowledge_dir: str = str(PROJECT_ROOT / "knowledge_json")
-    db_dir:        str = str(PROJECT_ROOT / "data" / "vectordb")
 
     # Ingestion
     max_file_size_mb: int = 50
 
-    # ChromaDB
-    chroma_persist_dir: str = "data/vectordb"
+    # ChromaDB — use the same absolute path as db_dir so it resolves correctly
+    # regardless of which directory uvicorn is launched from (critical in Colab)
+    chroma_persist_dir: str = str(PROJECT_ROOT / "data" / "vectordb")
     chroma_collection:  str = "datasheets"
     chroma_server_nofile: int = 4096
 
@@ -41,9 +41,9 @@ class Settings(BaseSettings):
 
 config = Settings()
 
-# Ensure required directories exist
+# Ensure required directories exist at startup
 for _dir in [
-    config.upload_dir, config.temp_dir, config.db_dir,
+    config.upload_dir, config.temp_dir, config.chroma_persist_dir,
     config.pdfs_dir, config.docling_dir, config.knowledge_dir,
 ]:
     Path(_dir).mkdir(parents=True, exist_ok=True)
