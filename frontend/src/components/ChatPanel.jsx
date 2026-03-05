@@ -139,7 +139,7 @@ function Message({ msg, elapsed = 0 }) {
         {msg.directMode && (
           <div className="flex items-center gap-1.5 text-[11px] text-cyan-400 bg-cyan-500/10 border border-cyan-500/20 px-2.5 py-1 rounded-lg">
             <BookOpen className="w-3 h-3" />
-            Direct Context Mode — extracted from datasheet (Ollama unavailable)
+            Direct Context Mode — extracted from datasheet (LLM unavailable)
           </div>
         )}
 
@@ -286,7 +286,9 @@ export default function ChatPanel({ components = [] }) {
     try {
       const response = await fetch(`${API_BASE_URL}/chat/stream`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+        },
         body: JSON.stringify({
           query,
           component_filter: componentFilter || null,
@@ -305,16 +307,15 @@ export default function ChatPanel({ components = [] }) {
 
       while (true) {
         const { done, value } = await reader.read();
-        
-        // Decode the chunk (value is a Uint8Array)
-        if (value) {
-          buffer += decoder.decode(value, { stream: true });
-        }
-        
-        if (done) break;
 
+        // Decode chunk; when done=true flush remaining bytes too
+        if (value) {
+          buffer += decoder.decode(value, { stream: !done });
+        }
+
+        // Process ALL complete lines — even on the final read
         const lines = buffer.split('\n');
-        buffer = lines.pop(); // keep incomplete last line in buffer
+        buffer = done ? '' : (lines.pop() ?? '');
 
         for (const line of lines) {
           if (!line.startsWith('data: ')) continue;
@@ -323,7 +324,6 @@ export default function ChatPanel({ components = [] }) {
 
             if (evt.type === 'sources') {
               receivedSources = evt.sources || [];
-              // Show sources instantly even before tokens arrive
               setMessages(prev => {
                 const u = [...prev];
                 u[u.length - 1] = { ...u[u.length - 1], sources: receivedSources };
@@ -335,11 +335,7 @@ export default function ChatPanel({ components = [] }) {
               fullText += evt.token;
               setMessages(prev => {
                 const u = [...prev];
-                u[u.length - 1] = {
-                  ...u[u.length - 1],
-                  content: fullText,
-                  loading: true,
-                };
+                u[u.length - 1] = { ...u[u.length - 1], content: fullText, loading: true };
                 return u;
               });
             }
@@ -367,6 +363,8 @@ export default function ChatPanel({ components = [] }) {
             }
           } catch { /* ignore malformed lines */ }
         }
+
+        if (done) break;
       }
     } catch (err) {
       const errMsg = err.message || 'Request failed';
@@ -424,7 +422,7 @@ export default function ChatPanel({ components = [] }) {
           <div>
             <h2 className="text-base font-semibold text-slate-200">CircuitAI Chat</h2>
             <p className="text-xs text-slate-500 flex items-center gap-1">
-              <Cpu className="w-3 h-3" /> RAG · Ollama · BGE-M3
+              <Cpu className="w-3 h-3" /> RAG · HuggingFace · BGE-M3
             </p>
           </div>
         </div>

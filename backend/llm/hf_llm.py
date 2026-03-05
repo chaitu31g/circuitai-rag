@@ -1,15 +1,18 @@
 """
 backend/llm/hf_llm.py
 ─────────────────────
-HuggingFace Transformers-based LLM module for CircuitAI RAG.
+HuggingFace Transformers LLM module for CircuitAI RAG.
 
-Replaces the Ollama integration so the backend runs inside Google Colab
-(or any environment with a CUDA-capable GPU) without needing a sidecar
-service.
+Designed for Google Colab (CUDA GPU) or CPU-only environments.
+Supports any instruction-tuned causal LM on HuggingFace Hub.
 
-Model  : mistralai/Mistral-7B-Instruct-v0.2
-Quant  : 4-bit (bitsandbytes NF4) – fits comfortably on a T4 (16 GB VRAM)
-Device : auto-selected by `device_map="auto"` (GPU if available, else CPU)
+Model  : set via HF_MODEL env var (default: Qwen/Qwen2.5-3B-Instruct)
+Quant  : 4-bit NF4 (bitsandbytes) — fits on a T4 (16 GB VRAM)
+Device : auto-selected by device_map="auto"
+
+Prompt format is handled automatically by the tokenizer's apply_chat_template(),
+so switching models (Qwen, Mistral, Llama, Gemma, etc.) never requires prompt
+format changes.
 """
 
 from __future__ import annotations
@@ -17,44 +20,49 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from typing import Optional
+from typing import Generator
 
 logger = logging.getLogger(__name__)
 
-# ── Module-level singletons (loaded once at startup) ──────────────────────────
+# ── Module-level singletons ────────────────────────────────────────────────────
 _tokenizer = None
-_model = None
+_model     = None
 _load_lock = threading.Lock()
 
-# Default model – override via the HF_MODEL env variable or config
-DEFAULT_MODEL = os.environ.get(
-    "HF_MODEL", "mistralai/Mistral-7B-Instruct-v0.2"
+DEFAULT_MODEL = os.environ.get("HF_MODEL", "Qwen/Qwen2.5-3B-Instruct")
+
+# System prompt injected into the chat template for every query.
+_SYSTEM_PROMPT = (
+    "You are an expert electronics datasheet assistant. "
+    "Use ONLY the provided datasheet context to answer the question accurately. "
+    "If the answer is not present in the context, say so clearly. "
+    "Do not invent values, specifications, or conditions."
 )
 
 
-def _load_model(model_id: str = DEFAULT_MODEL) -> None:
-    """Load the tokenizer and 4-bit quantized model into the module globals.
+# ─────────────────────────────────────────────────────────────────────────────
+# Internal loader
+# ─────────────────────────────────────────────────────────────────────────────
 
-    Calling this more than once is a no-op (guarded by a threading lock).
-    """
+def _load_model(model_id: str = DEFAULT_MODEL) -> None:
+    """Load tokenizer + 4-bit quantised model into module globals (once)."""
     global _tokenizer, _model
 
     with _load_lock:
         if _model is not None:
-            return  # Already loaded
+            return
 
         try:
             import torch
             from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
         except ImportError as exc:
             raise RuntimeError(
-                "Required packages are missing. Install them with:\n"
+                "Required packages missing. Install with:\n"
                 "  pip install transformers accelerate bitsandbytes"
             ) from exc
 
         logger.info("Loading HuggingFace model: %s …", model_id)
 
-        # 4-bit NF4 quantisation config – keeps VRAM usage manageable on T4
         bnb_config = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_use_double_quant=True,
@@ -63,57 +71,96 @@ def _load_model(model_id: str = DEFAULT_MODEL) -> None:
         )
 
         _tokenizer = AutoTokenizer.from_pretrained(model_id)
+
+        # Ensure a pad token exists (some models omit it)
+        if _tokenizer.pad_token is None:
+            _tokenizer.pad_token = _tokenizer.eos_token
+
         _model = AutoModelForCausalLM.from_pretrained(
             model_id,
             quantization_config=bnb_config,
-            device_map="auto",          # GPU if CUDA available, else CPU
+            device_map="auto",
             torch_dtype=torch.float16,
         )
         _model.eval()
-        logger.info("Model loaded successfully ✓  (device_map=auto)")
+        logger.info("Model loaded ✓  (model=%s, device_map=auto)", model_id)
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Public API
+# ─────────────────────────────────────────────────────────────────────────────
 
 def load_model_once(model_id: str = DEFAULT_MODEL) -> None:
-    """Public entry-point called at FastAPI startup to pre-load the model."""
+    """Pre-load the model at startup so the first chat request is fast."""
     _load_model(model_id)
 
 
+def build_prompt(context: str, query: str) -> list[dict]:
+    """Build the chat messages list for the RAG query.
+
+    Returns a list of message dicts ({'role': ..., 'content': ...}) which are
+    passed to the tokenizer's apply_chat_template(). This approach works
+    correctly for ANY instruction-tuned model (Qwen, Mistral, Llama, Gemma…)
+    without manual prompt format management.
+    """
+    user_content = (
+        f"Datasheet Context:\n{context}\n\n"
+        f"Question:\n{query}"
+    )
+    return [
+        {"role": "system",  "content": _SYSTEM_PROMPT},
+        {"role": "user",    "content": user_content},
+    ]
+
+
+def _apply_template(messages: list[dict]) -> str:
+    """Convert chat messages → model-specific prompt string via the tokenizer."""
+    if _tokenizer is None:
+        raise RuntimeError("Model is not loaded yet.")
+    return _tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,   # adds the assistant turn opener
+    )
+
+
 def generate_response(
-    prompt: str,
+    prompt: list[dict] | str,
+    model_id: str = DEFAULT_MODEL,
     max_new_tokens: int = 512,
     temperature: float = 0.2,
     do_sample: bool = True,
-    model_id: str = DEFAULT_MODEL,
 ) -> str:
-    """Generate a text response for *prompt* using the loaded HF model.
+    """Generate a complete response (non-streaming).
 
     Parameters
     ----------
     prompt:
-        The full prompt string (already includes system context + user query).
-    max_new_tokens:
-        Maximum number of tokens the model may generate.
-    temperature:
-        Sampling temperature. Lower = more deterministic answers.
-    do_sample:
-        Whether to use sampling (True) or greedy decoding (False).
+        Either the list of chat messages returned by build_prompt(), or
+        a raw string (legacy path — still supported).
     model_id:
-        Model to load if not already loaded (default: Mistral-7B-Instruct-v0.2).
+        HuggingFace model repo ID. Used only if model isn't loaded yet.
+    max_new_tokens:
+        Max tokens to generate.
+    temperature:
+        Sampling temperature — lower is more deterministic.
+    do_sample:
+        True = sampling; False = greedy decoding.
 
     Returns
     -------
     str
-        The decoded generated text (prompt stripped from output).
+        The generated text with the prompt stripped out.
     """
-    # Lazy-load on first call if startup didn't pre-load
     if _model is None:
         _load_model(model_id)
 
     import torch
 
-    inputs = _tokenizer(prompt, return_tensors="pt")
+    # Accept both messages list and raw string
+    text = _apply_template(prompt) if isinstance(prompt, list) else prompt
 
-    # Move input tensors to the same device as the model's first parameter
+    inputs = _tokenizer(text, return_tensors="pt")
     device = next(_model.parameters()).device
     inputs = {k: v.to(device) for k, v in inputs.items()}
 
@@ -126,31 +173,69 @@ def generate_response(
             pad_token_id=_tokenizer.eos_token_id,
         )
 
-    # Decode only the newly generated tokens (strip the prompt)
     input_length = inputs["input_ids"].shape[1]
     new_tokens = output_ids[0][input_length:]
     return _tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
 
 
-def build_prompt(context: str, query: str) -> str:
-    """Build the standardised RAG prompt for the electronics datasheet assistant.
+def stream_response(
+    prompt: list[dict] | str,
+    model_id: str = DEFAULT_MODEL,
+    max_new_tokens: int = 512,
+    temperature: float = 0.2,
+    do_sample: bool = True,
+) -> Generator[str, None, None]:
+    """Stream tokens from the HuggingFace model one by one.
+
+    Uses transformers.TextIteratorStreamer to push tokens from a background
+    thread while the calling generator yields them to the SSE endpoint.
 
     Parameters
     ----------
-    context:
-        The retrieved and assembled context chunks from ChromaDB.
-    query:
-        The user's question.
+    prompt:
+        Either the list of chat messages (from build_prompt()) or a raw string.
 
-    Returns
-    -------
+    Yields
+    ------
     str
-        The formatted prompt string ready for :func:`generate_response`.
+        Each token string as it is decoded.
     """
-    return (
-        "You are an expert electronics datasheet assistant.\n\n"
-        "Use the provided datasheet context to answer the question accurately.\n\n"
-        f"Context:\n{context}\n\n"
-        f"Question:\n{query}\n\n"
-        "Answer clearly and technically."
+    if _model is None:
+        _load_model(model_id)
+
+    import torch
+    from transformers import TextIteratorStreamer
+
+    text = _apply_template(prompt) if isinstance(prompt, list) else prompt
+
+    inputs = _tokenizer(text, return_tensors="pt")
+    device = next(_model.parameters()).device
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+
+    streamer = TextIteratorStreamer(
+        _tokenizer,
+        skip_prompt=True,          # don't echo the input prompt
+        skip_special_tokens=True,
     )
+
+    gen_kwargs = {
+        **inputs,
+        "streamer":         streamer,
+        "max_new_tokens":   max_new_tokens,
+        "temperature":      temperature,
+        "do_sample":        do_sample,
+        "pad_token_id":     _tokenizer.eos_token_id,
+    }
+
+    gen_thread = threading.Thread(
+        target=lambda: _model.generate(**gen_kwargs),
+        daemon=True,
+        name="hf-generate",
+    )
+    gen_thread.start()
+
+    for token in streamer:
+        if token:
+            yield token
+
+    gen_thread.join()

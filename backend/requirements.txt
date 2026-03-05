@@ -6,12 +6,12 @@ chromadb==0.5.21
 sentence-transformers==3.3.1
 docling==2.11.0
 PyMuPDF==1.25.1
-# torch is intentionally unpinned — Colab provides a CUDA-enabled build pre-installed.
-# When running locally, install manually: pip install torch --index-url https://download.pytorch.org/whl/cu121
-torch
 python-multipart==0.0.19
 Requests==2.32.3
-# HuggingFace LLM inference (replaces Ollama)
-transformers>=4.40.0
+
+# HuggingFace LLM inference (Google Colab — GPU/CUDA environment)
+# torch is NOT listed here — Colab provides a CUDA-enabled build pre-installed.
+# When running locally: pip install torch --index-url https://download.pytorch.org/whl/cu121
+transformers>=4.40.0    # TextIteratorStreamer requires >= 4.36
 accelerate>=0.29.0
-bitsandbytes>=0.43.0
+bitsandbytes>=0.43.0    # 4-bit NF4 quantisation

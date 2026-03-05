@@ -1,1 +1,2 @@
-export const API_BASE_URL = "http://3.108.227.217:8000";
+export const API_BASE_URL =
+  "https://reviewing-physicians-addressed-ict.trycloudflare.com";
