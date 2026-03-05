@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 # ── Module-level singleton (shared across all VisionProcessor instances) ───────
 _model     = None
 _tokenizer = None
+_device    = None   # set once during load; reused in describe_image()
 _load_lock = threading.Lock()
 
 _MODEL_ID = "vikhyatk/moondream2"
@@ -48,7 +49,15 @@ def _load_moondream() -> tuple:
                 "transformers is not installed. Run: pip install transformers"
             ) from exc
 
-        logger.info("Loading vision model %s  (revision=%s) …", _MODEL_ID, _REVISION)
+        import torch
+
+        # moondream2 does NOT implement _no_split_modules, so device_map="auto"
+        # raises an error. Load on CPU first, then move to the target device.
+        _device = "cuda" if torch.cuda.is_available() else "cpu"
+        logger.info(
+            "Loading vision model %s  (revision=%s, device=%s) …",
+            _MODEL_ID, _REVISION, _device,
+        )
 
         _tokenizer = AutoTokenizer.from_pretrained(
             _MODEL_ID,
@@ -59,10 +68,10 @@ def _load_moondream() -> tuple:
             _MODEL_ID,
             revision=_REVISION,
             trust_remote_code=True,
-            device_map="auto",        # GPU when available, else CPU
         )
+        _model = _model.to(_device)
         _model.eval()
-        logger.info("moondream2 ready ✓")
+        logger.info("moondream2 ready ✓  (device=%s)", _device)
 
     return _tokenizer, _model
 
@@ -122,13 +131,13 @@ class VisionProcessor:
         try:
             from PIL import Image
 
-            tokenizer, model = _tokenizer, _model
-
             pil_image = Image.open(BytesIO(image_bytes)).convert("RGB")
 
             # moondream2 API: encode image → answer question
-            encoded = model.encode_image(pil_image)
-            answer  = model.answer_question(encoded, prompt, tokenizer)
+            # _model and _tokenizer are module-level singletons; _device is
+            # the same device the model was moved to during loading.
+            encoded = _model.encode_image(pil_image)
+            answer  = _model.answer_question(encoded, prompt, _tokenizer)
 
             return answer.strip() if answer else None
 

@@ -91,11 +91,27 @@ function StageStrip({ stagesDone = [], currentStage = null, status }) {
 
 // ── Live terminal log panel ───────────────────────────────────────────────────
 function TerminalLog({ logs = [], isLive = false }) {
-  const bottomRef = useRef(null);
+  const containerRef  = useRef(null);   // ref to the scrollable div
+  const pausedRef     = useRef(false);  // true when user has scrolled up
 
-  // Auto-scroll to bottom whenever new logs arrive
+  // When the user scrolls, decide whether to pause auto-scroll
+  const handleScroll = () => {
+    const el = containerRef.current;
+    if (!el) return;
+    // Within 40px of the bottom → resume; further up → pause
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    pausedRef.current = !atBottom;
+  };
+
+  // Auto-scroll only when NOT paused by the user
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (pausedRef.current) return;
+    const el = containerRef.current;
+    if (el) {
+      // Scroll the terminal container directly — never calls scrollIntoView
+      // which would scroll the whole page.
+      el.scrollTop = el.scrollHeight;
+    }
   }, [logs]);
 
   return (
@@ -120,7 +136,11 @@ function TerminalLog({ logs = [], isLive = false }) {
       </div>
 
       {/* Log lines */}
-      <div className="bg-slate-950/80 max-h-56 overflow-y-auto custom-scrollbar px-3 py-2 font-mono text-[10px] leading-relaxed">
+      <div
+        ref={containerRef}
+        onScroll={handleScroll}
+        className="bg-slate-950/80 max-h-56 overflow-y-auto custom-scrollbar px-3 py-2 font-mono text-[10px] leading-relaxed"
+      >
         {logs.length === 0 ? (
           <p className="text-slate-600">Waiting for pipeline output…</p>
         ) : (
@@ -148,7 +168,6 @@ function TerminalLog({ logs = [], isLive = false }) {
             );
           })
         )}
-        <div ref={bottomRef} />
       </div>
     </div>
   );
