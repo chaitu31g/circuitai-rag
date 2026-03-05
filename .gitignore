@@ -55,7 +55,7 @@ yarn-error.log*
 
 # --- CircuitAI RAG specific ---
 # Vector DB persistent storage
-data/vectordb/
+# data/vectordb/
 
 # File storage / uploads
 uploads/
