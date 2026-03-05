@@ -201,7 +201,7 @@ _GRAPH_CAPTION_KEYWORDS = {
 
 
 def chunk_figure(figure: dict, part_number: str, pdf_path: Optional[Path] = None) -> Optional[Chunk]:
-    vision = VisionProcessor(model="moondream")
+    vision = VisionProcessor(model="qwen2-vl")
 
     captions = figure.get("captions", [])
     cap_text = " ".join(

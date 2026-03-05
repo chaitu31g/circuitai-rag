@@ -12,11 +12,10 @@ Requests==2.32.3
 # HuggingFace LLM inference (Google Colab — GPU/CUDA environment)
 # torch is NOT listed here — Colab provides a CUDA-enabled build pre-installed.
 # When running locally: pip install torch --index-url https://download.pytorch.org/whl/cu121
-transformers>=4.40.0    # TextIteratorStreamer requires >= 4.36
+transformers>=4.45.0    # Qwen2-VL support requires >= 4.45; TextIteratorStreamer >= 4.36
 accelerate>=0.29.0
-bitsandbytes>=0.43.0    # 4-bit NF4 quantisation
+bitsandbytes>=0.43.0    # 4-bit NF4 quantisation for the chat LLM (Qwen2.5)
+safetensors>=0.4.0      # fast, safe weight loading for Qwen2-VL shards
 
-# Vision model — vikhyatk/moondream2 (figures & diagrams from datasheets)
-Pillow>=10.0.0           # PIL image handling for moondream2 input
-einops>=0.7.0            # required by moondream2 remote code
-timm>=0.9.0              # vision encoder backbone used by moondream2
+# Vision model — Qwen/Qwen2-VL-2B-Instruct (figures & diagrams from datasheets)
+Pillow>=10.0.0          # PIL image handling for vision model input

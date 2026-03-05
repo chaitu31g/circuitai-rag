@@ -1,15 +1,15 @@
 """
 ingestion/vision_processor.py
 ─────────────────────────────
-Vision analysis for PDF figures using vikhyatk/moondream2 via HuggingFace.
+Vision analysis for PDF figures using Qwen/Qwen2-VL-2B-Instruct via HuggingFace.
 
-Works in Google Colab (T4 GPU) without any sidecar service.
+Replaces Moondream2. Qwen2-VL is significantly better at reading technical
+graphs, axis labels, trends, and engineering diagrams from datasheets.
 
-Model  : vikhyatk/moondream2  (~1.8 GB VRAM — fits alongside Qwen2.5-3B on T4)
+Model  : Qwen/Qwen2-VL-2B-Instruct (~5 GB, fits on T4 GPU with float16)
 Loading: Module-level singleton — loaded ONCE on the first VisionProcessor()
-         instantiation, then reused for every subsequent figure. This means
-         even though datasheet_chunker.py creates a new VisionProcessor(model=...)
-         per figure, the model is never loaded more than once per process.
+         instantiation, shared across every figure in the pipeline.
+Device : device_map="auto" (GPU layers auto-placed by Accelerate)
 """
 
 from __future__ import annotations
@@ -24,88 +24,91 @@ import fitz  # PyMuPDF
 
 logger = logging.getLogger(__name__)
 
-# ── Module-level singleton (shared across all VisionProcessor instances) ───────
+# ── Module-level singleton ─────────────────────────────────────────────────────
 _model     = None
-_tokenizer = None
-_device    = None   # set once during load; reused in describe_image()
+_processor = None
+_device    = None
 _load_lock = threading.Lock()
 
-_MODEL_ID = "vikhyatk/moondream2"
-_REVISION = "2025-01-09"   # pin for reproducibility
+_DEFAULT_MODEL_ID = "Qwen/Qwen2-VL-2B-Instruct"
 
 
-def _load_moondream() -> tuple:
-    """Load moondream2 once into module globals; subsequent calls are a no-op."""
-    global _model, _tokenizer
+def _load_qwen2vl(model_id: str = _DEFAULT_MODEL_ID) -> None:
+    """Load Qwen2-VL processor + model once; subsequent calls are a no-op."""
+    global _model, _processor, _device
 
     with _load_lock:
         if _model is not None:
-            return _tokenizer, _model
+            return
 
         try:
-            from transformers import AutoModelForCausalLM, AutoTokenizer
+            import torch
+            from transformers import AutoProcessor, AutoModelForVision2Seq
         except ImportError as exc:
             raise RuntimeError(
-                "transformers is not installed. Run: pip install transformers"
+                "Required packages missing. Run:\n"
+                "  pip install transformers>=4.45 accelerate pillow"
             ) from exc
 
-        import torch
-
-        # moondream2 does NOT implement _no_split_modules, so device_map="auto"
-        # raises an error. Load on CPU first, then move to the target device.
         _device = "cuda" if torch.cuda.is_available() else "cpu"
         logger.info(
-            "Loading vision model %s  (revision=%s, device=%s) …",
-            _MODEL_ID, _REVISION, _device,
+            "Loading Qwen2-VL vision model: %s  (device=%s) …", model_id, _device
         )
 
-        _tokenizer = AutoTokenizer.from_pretrained(
-            _MODEL_ID,
-            revision=_REVISION,
+        _processor = AutoProcessor.from_pretrained(
+            model_id,
             trust_remote_code=True,
         )
-        _model = AutoModelForCausalLM.from_pretrained(
-            _MODEL_ID,
-            revision=_REVISION,
-            trust_remote_code=True,
+        _model = AutoModelForVision2Seq.from_pretrained(
+            model_id,
+            torch_dtype=torch.float16,
+            device_map="auto",        # Qwen2-VL supports device_map natively
         )
-        _model = _model.to(_device)
         _model.eval()
-        logger.info("moondream2 ready ✓  (device=%s)", _device)
+        logger.info("Vision model loaded successfully ✓  (device_map=auto)")
 
-    return _tokenizer, _model
+
+# ── Prompt templates ───────────────────────────────────────────────────────────
+
+_GRAPH_PROMPT = """\
+You are analyzing a graph from an electronics component datasheet.
+
+Explain:
+• what the x-axis represents (variable name and units)
+• what the y-axis represents (variable name and units)
+• what relationship the graph shows between these variables
+• the trend of the curve
+
+Provide a concise technical explanation suitable for an engineer."""
+
+_FIGURE_PROMPT = (
+    "This image is from an electronics datasheet. "
+    "Describe the diagram, component drawing, or table "
+    "and summarize the important information shown."
+)
 
 
 # ── VisionProcessor ────────────────────────────────────────────────────────────
 
 class VisionProcessor:
     """
-    Instantiate with:
-        vision = VisionProcessor(model="moondream")   # existing call in chunker
+    Drop-in replacement for the old Moondream-based processor.
 
-    The `model` argument currently selects the backend; "moondream" maps to
-    vikhyatk/moondream2 on HuggingFace. The architecture makes it easy to
-    add other models later.
+    Usage (unchanged from datasheet_chunker.py):
+        vision = VisionProcessor(model="qwen2-vl")
+        desc   = vision.extract_and_describe(pdf_path, page, bbox, is_graph=True)
     """
 
-    def __init__(self, model: str = "moondream") -> None:
+    def __init__(self, model: str = "qwen2-vl") -> None:
         self.model_name = model
+        model_id = _DEFAULT_MODEL_ID   # future: map other names here
 
-        # Eagerly load on first instantiation so the first figure call
-        # doesn't incur hidden latency mid-pipeline.
-        if self.model_name == "moondream":
-            try:
-                _load_moondream()
-            except Exception as exc:
-                # Non-fatal: if loading fails we fall back to caption-only mode.
-                logger.warning(
-                    "moondream2 failed to load — figures will use caption-only mode. "
-                    "Error: %s", exc,
-                )
-        else:
+        try:
+            _load_qwen2vl(model_id)
+        except Exception as exc:
             logger.warning(
-                "Unknown vision model '%s'. Only 'moondream' is supported. "
-                "Falling back to caption-only mode.", model,
+                "Qwen2-VL failed to load — figures will use caption-only mode. "
+                "Error: %s", exc,
             )
 
     # ── Public API ─────────────────────────────────────────────────────────────
@@ -113,49 +116,73 @@ class VisionProcessor:
     def describe_image(
         self,
         image_bytes: bytes,
-        prompt: str,
+        prompt: str = "",           # kept for backward-compat; overridden by is_graph
         is_graph: bool = False,
     ) -> Optional[str]:
-        """Run moondream2 on raw image bytes and return a description.
-
-        For graph images, three targeted VQA questions are asked and their
-        answers concatenated — moondream2 is a VQA model and responds much
-        better to short focused questions than to long instructions.
+        """Run Qwen2-VL on raw PNG image bytes and return a text description.
 
         Parameters
         ----------
-        image_bytes : raw PNG bytes from PyMuPDF pixmap
-        prompt      : fallback question (used for non-graph figures)
-        is_graph    : True → run the multi-question graph analysis path
+        image_bytes : Raw bytes from a PyMuPDF pixmap (PNG).
+        prompt      : Legacy/fallback prompt (ignored when is_graph determines template).
+        is_graph    : True → use the detailed graph analysis prompt.
+
+        Returns
+        -------
+        str or None
         """
-        if self.model_name != "moondream" or _model is None:
+        if _model is None or _processor is None:
             return None
 
         try:
+            import torch
             from PIL import Image
 
-            pil_image = Image.open(BytesIO(image_bytes)).convert("RGB")
+            pil_image   = Image.open(BytesIO(image_bytes)).convert("RGB")
+            text_prompt = _GRAPH_PROMPT if is_graph else _FIGURE_PROMPT
 
-            # Encode once — all answer_question calls reuse this encoding
-            encoded = _model.encode_image(pil_image)
+            # Build chat message with image + text
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "image": pil_image},
+                        {"type": "text",  "text":  text_prompt},
+                    ],
+                }
+            ]
 
-            if is_graph:
-                # Three short, targeted VQA questions produce richer embeddings
-                # than one long instruction for a graph image.
-                questions = [
-                    "What are the x-axis variable and its units in this graph?",
-                    "What are the y-axis variable and its units in this graph?",
-                    "What is the main trend or relationship shown by the curve?",
-                ]
-                parts = []
-                for q in questions:
-                    ans = _model.answer_question(encoded, q, _tokenizer)
-                    if ans and ans.strip():
-                        parts.append(ans.strip())
-                return " ".join(parts) if parts else None
-            else:
-                ans = _model.answer_question(encoded, prompt, _tokenizer)
-                return ans.strip() if ans else None
+            # Tokenise using the model's native chat template
+            text = _processor.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            inputs = _processor(
+                text=[text],
+                images=[pil_image],
+                padding=True,
+                return_tensors="pt",
+            ).to(_device)
+
+            with torch.no_grad():
+                generated_ids = _model.generate(
+                    **inputs,
+                    max_new_tokens=256,
+                    do_sample=False,        # deterministic — better for specs
+                )
+
+            # Strip the echoed input tokens
+            trimmed = [
+                out[len(inp):]
+                for inp, out in zip(inputs.input_ids, generated_ids)
+            ]
+            result = _processor.batch_decode(
+                trimmed,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            )
+            return result[0].strip() if result else None
 
         except Exception as exc:
             logger.error("Vision inference failed: %s", exc, exc_info=True)
@@ -168,23 +195,14 @@ class VisionProcessor:
         bbox: dict,
         is_graph: bool = False,
     ) -> Optional[str]:
-        """Crop a figure from a PDF page and describe it with moondream2.
+        """Crop a figure region from a PDF page and describe it with Qwen2-VL.
 
         Parameters
         ----------
-        pdf_path:
-            Path to the source PDF.
-        page_no:
-            1-indexed page number (Docling provenance convention).
-        bbox:
-            Docling bbox dict — keys: l, t, r, b, coord_origin.
-        is_graph:
-            True → technical graph prompt; False → general diagram prompt.
-
-        Returns
-        -------
-        str or None
-            Vision model description, or None on failure.
+        pdf_path : Absolute path to the source PDF.
+        page_no  : 1-indexed page number (Docling provenance convention).
+        bbox     : Docling bbox dict — keys: l, t, r, b, coord_origin.
+        is_graph : True → graph analysis prompt; False → diagram prompt.
         """
         try:
             pdf_path = Path(pdf_path)
@@ -193,7 +211,7 @@ class VisionProcessor:
                 return None
 
             with fitz.open(str(pdf_path)) as doc:
-                page     = doc[page_no - 1]   # 1-indexed → 0-indexed
+                page     = doc[page_no - 1]   # Docling 1-indexed → PyMuPDF 0-indexed
                 p_height = page.rect.height
 
                 l = bbox.get("l", 0)
@@ -207,24 +225,17 @@ class VisionProcessor:
                 else:
                     rect = fitz.Rect(l, t, r, b)
 
-                # 2-pixel padding + 2× resolution for better model accuracy
+                # 2-pixel padding + 2× super-sampling for model clarity
                 rect.x0 -= 2; rect.y0 -= 2
                 rect.x1 += 2; rect.y1 += 2
 
                 pix         = page.get_pixmap(clip=rect, matrix=fitz.Matrix(2, 2))
                 image_bytes = pix.tobytes("png")
 
-            # For non-graph figures, use a single descriptive question
-            prompt = (
-                "Describe this diagram from an electronics datasheet. "
-                "Explain any components, symbols, pin labels, or circuit elements shown."
-            )
-
             logger.info(
-                "moondream2 — analysing figure page=%d is_graph=%s", page_no, is_graph
+                "Analyzing figure page=%s is_graph=%s", page_no, is_graph
             )
-            # is_graph=True activates the multi-question VQA path in describe_image
-            return self.describe_image(image_bytes, prompt, is_graph=is_graph)
+            return self.describe_image(image_bytes, is_graph=is_graph)
 
         except Exception as exc:
             logger.error("Vision extraction failed: %s", exc, exc_info=True)
