@@ -191,11 +191,22 @@ def chunk_table(table: dict, section_name: str, part_number: str) -> Optional[Ch
 # ---------------------------------------------------------------------------
 
 
-def chunk_figure(figure: dict, part_number: str, pdf_path: Optional[Path] = None) -> Optional[Chunk]:
+def chunk_figure(
+    figure: dict,
+    part_number: str,
+    pdf_path: Optional[Path] = None,
+    figure_index: int = 0,
+) -> Optional[Chunk]:
     """Classify and analyze a figure from a parsed Docling document.
 
     Routes to DePlot (charts/graphs) or Qwen2-VL (diagrams) via FigureAnalyzer.
     Returns a Chunk whose text contains structured axis/trend/description data.
+
+    Parameters
+    ----------
+    figure_index : Global sequential index of this figure within the document.
+                  Embedded into fallback chunk text to guarantee uniqueness
+                  even when a figure has no caption and no bbox.
     """
     analyzer = FigureAnalyzer()
 
@@ -210,10 +221,11 @@ def chunk_figure(figure: dict, part_number: str, pdf_path: Optional[Path] = None
 
     # Run the dual-model vision pipeline
     vision_text = None
+    figure_type = "unknown"  # determined below
     if page and bbox:
         logger.info(
-            "FigureAnalyzer: dispatching figure page=%s for %s  caption=%r",
-            page, part_number, cap_text[:60],
+            "FigureAnalyzer: dispatching figure %d page=%s for %s  caption=%r",
+            figure_index, page, part_number, cap_text[:60],
         )
         vision_text = analyzer.extract_and_describe(
             pdf_path=pdf_path,
@@ -223,40 +235,78 @@ def chunk_figure(figure: dict, part_number: str, pdf_path: Optional[Path] = None
             part_number=part_number,
         )
 
-    # FigureAnalyzer already returns structured text; use it directly if available.
-    # Fallback: caption-only or coordinate reference.
+    # ── Determine figure_type from vision text header ──────────────────────────
+    # FigureAnalyzer always prefixes output with "Figure Type: Graph" / "Diagram".
+    if vision_text:
+        first_line = (vision_text.splitlines() or [""])[0].lower()
+        if "graph" in first_line:
+            figure_type = "graph"
+        elif "diagram" in first_line:
+            figure_type = "diagram"
+        else:
+            figure_type = "unknown"
+    else:
+        # Caption-based fallback classification
+        _chart_kw = {
+            "graph", "curve", "plot", "vs", "characteristics", "temperature",
+            "current", "voltage", "power", "efficiency", "soa", "switching",
+        }
+        figure_type = "graph" if any(kw in cap_text.lower() for kw in _chart_kw) else "diagram"
+
+    # ── Build chunk text ───────────────────────────────────────────────────────
+    # FigureAnalyzer returns structured text; use it directly if available.
+    # Fallback paths embed figure_index to guarantee unique text per figure.
     if vision_text:
         text = vision_text
     elif cap_text:
+        type_label = "Graph" if figure_type == "graph" else "Diagram"
         text = (
-            f"Figure Type: Figure\n"
+            f"Figure Type: {type_label}\n"
             f"Caption: {cap_text}\n"
             f"Component: {part_number}\n"
-            f"Page: {page}\n\n"
+            f"Page: {page}\n"
+            f"Figure Index: {figure_index}\n\n"
             f"No vision analysis available."
         )
     else:
+        # Include figure_index so that bare figures (no caption, no bbox) never
+        # collide with each other in the seen_texts dedup set.
         bbox_str = f"{bbox.get('l', 0):.1f}_{bbox.get('t', 0):.1f}" if bbox else "unknown"
-        text = f"{part_number} figure on page {page} [ref: {bbox_str}]"
+        type_label = "Graph" if figure_type == "graph" else "Diagram"
+        text = (
+            f"Figure Type: {type_label}\n"
+            f"Component: {part_number}\n"
+            f"Page: {page}\n"
+            f"Figure Index: {figure_index}\n"
+            f"Ref: {bbox_str}"
+        )
 
-    # Classify for metadata — caption-only keyword check (image already handled by FigureAnalyzer above)
-    _chart_kw = {
-        "graph", "curve", "plot", "vs", "characteristics", "temperature",
-        "current", "voltage", "power", "efficiency", "soa", "switching",
-    }
-    is_graph = any(kw in cap_text.lower() for kw in _chart_kw)
+    # ── Extract axes from vision text when available ───────────────────────────
+    x_axis = ""
+    y_axis = ""
+    if vision_text:
+        for line in vision_text.splitlines():
+            ll = line.lower().strip()
+            if ll.startswith("x-axis:") or ll.startswith("x axis:"):
+                x_axis = line.split(":", 1)[-1].strip()
+            elif ll.startswith("y-axis:") or ll.startswith("y axis:"):
+                y_axis = line.split(":", 1)[-1].strip()
 
     return Chunk(
         text=text,
         chunk_type="figure",
         metadata={
-            "part_number":  part_number,
-            "chunk_type":   "figure",
-            "section_name": "figures_and_diagrams",
-            "page":         page,
-            "is_graph":     is_graph,
-            "has_vision":   vision_text is not None,
-            "caption":      cap_text or "",
+            "type":          "figure",
+            "chunk_type":    "figure",
+            "figure_type":   figure_type,
+            "figure_index":  figure_index,
+            "part_number":   part_number,
+            "section_name":  "figures_and_diagrams",
+            "page":          page,
+            "has_vision":    vision_text is not None,
+            "caption":       cap_text or "",
+            "x_axis":        x_axis,
+            "y_axis":        y_axis,
         },
     )
 
@@ -336,6 +386,22 @@ def chunk_document(
             return
         key = chunk.text.strip()
         if len(key) < MIN_CHUNK_LENGTH:
+            return
+        if key in seen_texts:
+            return
+        seen_texts.add(key)
+        all_chunks.append(chunk)
+
+    def _add_figure(chunk: Optional[Chunk]) -> None:
+        """Add a figure chunk without the MIN_CHUNK_LENGTH guard.
+
+        Figures should NEVER be silently dropped due to a short fallback text.
+        The figure_index embedded in the text already ensures uniqueness.
+        """
+        if chunk is None:
+            return
+        key = chunk.text.strip()
+        if not key:
             return
         if key in seen_texts:
             return
@@ -448,8 +514,12 @@ def chunk_document(
                     fig["captions"] = [{"text": best_cap}]
                     seen_raws.add(best_cap)
 
-    for fig in pictures:
-        _add(chunk_figure(fig, part_number, pdf_path=pdf_path))
+    for fig_idx, fig in enumerate(pictures):
+        _add_figure(chunk_figure(fig, part_number, pdf_path=pdf_path, figure_index=fig_idx))
+        logger.info(
+            "Figure chunk %d/%d processed for %s",
+            fig_idx + 1, len(pictures), part_number,
+        )
 
     # ═══════════════════════════════════════════════════════════════════════
     # PASS 2 — Sliding-window coverage guarantee
