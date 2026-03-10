@@ -186,6 +186,7 @@ def ingest_pdf_pipeline(pdf_path: str, job_id: str) -> None:
         update_job(job_id, current_stage=PipelineStage.EMBEDDING)
         _log(job_id, "")
         _log(job_id, "┌─ Stage 3/4 · BGE-M3 Embedding")
+        _log(job_id, f"│  Embedding model : BAAI/bge-m3")
         _log(job_id, f"│  Encoding {len(chunks)} chunks…")
 
         embedder = get_embedder()
@@ -195,6 +196,7 @@ def ingest_pdf_pipeline(pdf_path: str, job_id: str) -> None:
 
         dim = len(embedded[0]["embedding"]) if embedded else 0
         _log(job_id, f"│  Embedded : {len(embedded)} vectors  (dim={dim})")
+        _log(job_id, f"│  Vector dimension : {dim}")
 
         update_job(job_id, stage_completed=PipelineStage.EMBEDDING)
         _log(job_id, "└─ Embedding complete ✔")
@@ -211,6 +213,7 @@ def ingest_pdf_pipeline(pdf_path: str, job_id: str) -> None:
         store = ChromaStore(
             persist_dir=Path(config.chroma_persist_dir),
             collection_name=config.chroma_collection,
+            expected_dim=dim or 1024,   # triggers auto-rebuild if old 384-dim collection exists
         )
         before = store.count()
         store.upsert_chunks(embedded)

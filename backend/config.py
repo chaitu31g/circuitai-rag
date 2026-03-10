@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     hf_model: str = "Qwen/Qwen2.5-3B-Instruct"
 
     # Embedding & reranker
-    embedding_model: str = "BAAI/bge-small-en-v1.5"
+    embedding_model: str = "BAAI/bge-m3"
     reranker_model:  str = "BAAI/bge-reranker-base"
 
     class Config:

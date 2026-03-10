@@ -16,17 +16,18 @@ class ChromaStore(VectorStore):
         self,
         persist_dir: str | Path,
         collection_name: str = "datasheets",
+        expected_dim: Optional[int] = None,
     ):
-        self.persist_dir = Path(persist_dir)
+        self.persist_dir       = Path(persist_dir)
         self.persist_dir.mkdir(parents=True, exist_ok=True)
+        self._collection_name  = collection_name
+        self._expected_dim     = expected_dim
 
         self._client = chromadb.PersistentClient(
             path=str(self.persist_dir)
         )
 
-        self._collection = self._client.get_or_create_collection(
-            name=collection_name
-        )
+        self._collection = self._get_or_recreate_collection()
 
         logger.info(
             "ChromaStore ready — collection='%s', path='%s', existing docs=%d",
@@ -34,6 +35,45 @@ class ChromaStore(VectorStore):
             self.persist_dir,
             self.count(),
         )
+
+    def _get_or_recreate_collection(self):
+        """Return the collection, recreating it if the dimension has changed.
+
+        Old bge-small-en-v1.5 collections have dim=384.
+        The new bge-m3 collections have dim=1024.
+        Dimension mismatch causes silent wrong results or hard crashes,
+        so we drop-and-recreate rather than append.
+        """
+        col = self._client.get_or_create_collection(
+            name=self._collection_name
+        )
+
+        if self._expected_dim is not None and col.count() > 0:
+            # Probe the stored dimension by fetching one embedding
+            try:
+                sample = col.get(limit=1, include=["embeddings"])
+                stored_embs = sample.get("embeddings") or []
+                if stored_embs and len(stored_embs[0]) != self._expected_dim:
+                    stored_dim = len(stored_embs[0])
+                    logger.warning(
+                        "ChromaStore: collection '%s' has dim=%d but expected dim=%d. "
+                        "Deleting existing collection and rebuilding.",
+                        self._collection_name, stored_dim, self._expected_dim,
+                    )
+                    self._client.delete_collection(self._collection_name)
+                    col = self._client.get_or_create_collection(
+                        name=self._collection_name
+                    )
+                    logger.info(
+                        "ChromaStore: collection '%s' recreated (dim=%d).",
+                        self._collection_name, self._expected_dim,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "ChromaStore: dimension check failed (%s) — proceeding anyway.", exc
+                )
+
+        return col
 
     # -------------------------------------------------
     # UPSERT CHUNKS  (satisfies abstract method)

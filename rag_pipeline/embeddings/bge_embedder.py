@@ -1,7 +1,8 @@
-"""BGE-M3 compatible dense embedder using sentence-transformers.
+"""Dense embedder using BAAI/bge-m3 via sentence-transformers.
 
-Uses BAAI/bge-small-en-v1.5 (384-dim, ~133MB) by default.
-Swap MODEL_NAME to BAAI/bge-m3 (1024-dim) when resources allow.
+Model  : BAAI/bge-m3 (1024-dim, ~2.3 GB)
+Dim    : 1024
+Device : GPU (fp16) when available, CPU otherwise.
 
 Design: BGEM3Embedder is pure — it only produces vectors.
 It is deliberately decoupled from the vector DB layer so the
@@ -11,16 +12,15 @@ storage backend (Chroma, Qdrant, Milvus) can be swapped freely.
 from __future__ import annotations
 
 import logging
-import logging
 from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Configuration — swap to BAAI/bge-m3 when resources allow (1024-dim, ~2.3GB)
+# Configuration
 # ---------------------------------------------------------------------------
-MODEL_NAME = "BAAI/bge-small-en-v1.5"
+MODEL_NAME = "BAAI/bge-m3"      # 1024-dim; replaces bge-small-en-v1.5 (384-dim)
 DEFAULT_BATCH_SIZE = 16
 
 
@@ -52,10 +52,21 @@ class BGEM3Embedder:
     def model(self):
         from sentence_transformers import SentenceTransformer
         if self._model is None:
-            logger.info("Loading %s on %s ...", self.model_name, self.device)
-            self._model = SentenceTransformer(self.model_name, device=self.device)
+            use_fp16 = self.device == "cuda"
+            logger.info(
+                "Loading embedding model: %s  (device=%s, fp16=%s) …",
+                self.model_name, self.device, use_fp16,
+            )
+            self._model = SentenceTransformer(
+                self.model_name,
+                device=self.device,
+                model_kwargs={"torch_dtype": "float16"} if use_fp16 else {},
+            )
             dim = self._model.get_sentence_embedding_dimension()
-            logger.info("Model ready — dim=%d", dim)
+            logger.info(
+                "Embedding model ready — model=%s  dim=%d",
+                self.model_name, dim,
+            )
         return self._model
 
     # ------------------------------------------------------------------

@@ -2,7 +2,7 @@
 
 Pipeline:
     1. Load all *_chunks.json from rag_chunks/ (or custom path)
-    2. Embed with BGEM3Embedder (bge-small-en-v1.5)
+    2. Embed with BGEM3Embedder (BAAI/bge-m3, 1024-dim)
     3. Upsert into ChromaDB (data/vectordb/)
     4. Print summary
 
@@ -92,7 +92,11 @@ def main() -> None:
     # Step 3 — Store in ChromaDB                                           #
     # ------------------------------------------------------------------ #
     print(f"\n[3/4] Storing in ChromaDB ('{args.db_dir}') ...")
-    store = ChromaStore(persist_dir=args.db_dir, collection_name=args.collection)
+    store = ChromaStore(
+        persist_dir=args.db_dir,
+        collection_name=args.collection,
+        expected_dim=dim or 1024,
+    )
     store.upsert_chunks(embedded_chunks)
     print(f"      Collection '{args.collection}' now has {store.count} documents")
 

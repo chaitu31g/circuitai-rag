@@ -1,21 +1,37 @@
+# ── Web framework ─────────────────────────────────────────────────────────────
 fastapi==0.115.6
 uvicorn[standard]==0.32.1
 pydantic==2.10.3
 pydantic-settings==2.7.0
-chromadb==0.5.21
-sentence-transformers==3.3.1
-docling==2.11.0
-PyMuPDF==1.25.1
 python-multipart==0.0.19
 Requests==2.32.3
 
-# HuggingFace LLM inference (Google Colab — GPU/CUDA environment)
+# ── Vector database ───────────────────────────────────────────────────────────
+chromadb==0.5.21
+
+# ── Embedding model: BAAI/bge-m3 (1024-dim) ──────────────────────────────────
+sentence-transformers>=2.7.0
+
+# ── PDF parsing ───────────────────────────────────────────────────────────────
+docling==2.11.0
+PyMuPDF==1.25.1
+
+# ── HuggingFace / Transformers stack ─────────────────────────────────────────
 # torch is NOT listed here — Colab provides a CUDA-enabled build pre-installed.
 # When running locally: pip install torch --index-url https://download.pytorch.org/whl/cu121
-transformers>=4.45.0    # Qwen2-VL support requires >= 4.45; TextIteratorStreamer >= 4.36
+transformers>=4.45.0     # Qwen2-VL + DePlot (Pix2Struct) both require >= 4.45
 accelerate>=0.29.0
-bitsandbytes>=0.43.0    # 4-bit NF4 quantisation for the chat LLM (Qwen2.5)
-safetensors>=0.4.0      # fast, safe weight loading for Qwen2-VL shards
+bitsandbytes>=0.43.0     # 4-bit NF4 quantisation for the chat LLM (Qwen2.5)
+safetensors>=0.4.0       # fast, safe weight loading for Qwen2-VL / DePlot shards
+sentencepiece>=0.1.99    # required by some tokenizers
 
-# Vision model — Qwen/Qwen2-VL-2B-Instruct (figures & diagrams from datasheets)
-Pillow>=10.0.0          # PIL image handling for vision model input
+# ── Vision model dependencies ─────────────────────────────────────────────────
+# Qwen/Qwen2-VL-2B-Instruct  →  diagrams, circuit drawings, package outlines
+# google/deplot              →  charts, graphs, characteristic curves
+Pillow>=10.0.0
+numpy>=1.24.0
+timm>=0.9.0               # DePlot uses vision backbone from timm
+einops>=0.7.0             # Qwen2-VL attention utilities
+
+# ── Optional: faster image resizing ──────────────────────────────────────────
+# opencv-python>=4.8.0   # uncomment if you want CV2-based preprocessing

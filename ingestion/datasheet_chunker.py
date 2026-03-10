@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from ingestion.vision_processor import VisionProcessor
+from ingestion.vision.figure_analyzer import FigureAnalyzer
 
 logger = logging.getLogger(__name__)
 
@@ -190,18 +190,14 @@ def chunk_table(table: dict, section_name: str, part_number: str) -> Optional[Ch
 # Figure / image chunking
 # ---------------------------------------------------------------------------
 
-# Keywords in captions / section labels that indicate a graph (not a package drawing)
-_GRAPH_CAPTION_KEYWORDS = {
-    "curve", "characteristic", "vs", "versus", "plot", "graph",
-    "temperature", "current", "voltage", "power", "dissipation",
-    "drain", "gate", "source", "transfer", "output", "soa",
-    "safe operating", "capacitance", "impedance", "frequency",
-    "switching", "thermal", "resistance",
-}
-
 
 def chunk_figure(figure: dict, part_number: str, pdf_path: Optional[Path] = None) -> Optional[Chunk]:
-    vision = VisionProcessor(model="qwen2-vl")
+    """Classify and analyze a figure from a parsed Docling document.
+
+    Routes to DePlot (charts/graphs) or Qwen2-VL (diagrams) via FigureAnalyzer.
+    Returns a Chunk whose text contains structured axis/trend/description data.
+    """
+    analyzer = FigureAnalyzer()
 
     captions = figure.get("captions", [])
     cap_text = " ".join(
@@ -212,47 +208,54 @@ def chunk_figure(figure: dict, part_number: str, pdf_path: Optional[Path] = None
     page = (figure.get("prov") or [{}])[0].get("page_no") if figure.get("prov") else None
     bbox = (figure.get("prov") or [{}])[0].get("bbox") if figure.get("prov") else None
 
-    # Broader is_graph detection — checks caption text against a keyword set
-    # instead of the narrow 3-word list that missed most BSS84P figures.
-    cap_lower = cap_text.lower()
-    is_graph = any(kw in cap_lower for kw in _GRAPH_CAPTION_KEYWORDS)
-
-    # Run moondream vision analysis
-    vision_desc = None
+    # Run the dual-model vision pipeline
+    vision_text = None
     if page and bbox:
-        logger.info("Analysing figure page=%s is_graph=%s for %s", page, is_graph, part_number)
-        vision_desc = vision.extract_and_describe(pdf_path, page, bbox, is_graph=is_graph)
+        logger.info(
+            "FigureAnalyzer: dispatching figure page=%s for %s  caption=%r",
+            page, part_number, cap_text[:60],
+        )
+        vision_text = analyzer.extract_and_describe(
+            pdf_path=pdf_path,
+            page_no=page,
+            bbox=bbox,
+            caption=cap_text,
+            part_number=part_number,
+        )
 
-    # Build the chunk text — front-load component name + graph type so that
-    # semantic queries like "BSS84P power dissipation graph" match strongly.
-    if vision_desc:
-        if cap_text:
-            # e.g. "BSS84P graph — Power dissipation vs ambient temperature:\n<moondream answer>"
-            text = (
-                f"{part_number} graph — {cap_text} (page {page}):\n"
-                f"{vision_desc}"
-            )
-        else:
-            text = (
-                f"{part_number} figure analysis (page {page}):\n"
-                f"{vision_desc}"
-            )
+    # FigureAnalyzer already returns structured text; use it directly if available.
+    # Fallback: caption-only or coordinate reference.
+    if vision_text:
+        text = vision_text
     elif cap_text:
-        text = f"{part_number} figure — {cap_text} (page {page})"
+        text = (
+            f"Figure Type: Figure\n"
+            f"Caption: {cap_text}\n"
+            f"Component: {part_number}\n"
+            f"Page: {page}\n\n"
+            f"No vision analysis available."
+        )
     else:
         bbox_str = f"{bbox.get('l', 0):.1f}_{bbox.get('t', 0):.1f}" if bbox else "unknown"
         text = f"{part_number} figure on page {page} [ref: {bbox_str}]"
+
+    # Classify for metadata — caption-only keyword check (image already handled by FigureAnalyzer above)
+    _chart_kw = {
+        "graph", "curve", "plot", "vs", "characteristics", "temperature",
+        "current", "voltage", "power", "efficiency", "soa", "switching",
+    }
+    is_graph = any(kw in cap_text.lower() for kw in _chart_kw)
 
     return Chunk(
         text=text,
         chunk_type="figure",
         metadata={
             "part_number":  part_number,
-            "chunk_type":   "figure",       # explicit in metadata for ChromaDB filtering
+            "chunk_type":   "figure",
             "section_name": "figures_and_diagrams",
             "page":         page,
             "is_graph":     is_graph,
-            "has_vision":   vision_desc is not None,
+            "has_vision":   vision_text is not None,
             "caption":      cap_text or "",
         },
     )
