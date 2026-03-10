@@ -111,17 +111,24 @@ def _load_all_models() -> None:
         dtype   = torch.float16 if _device == "cuda" else torch.float32
 
         # ── Load DePlot ───────────────────────────────────────────────────────
+        # DePlot's processor always outputs float32 tensors regardless of device.
+        # Loading the model in float16 causes a dtype mismatch on generate():
+        #   RuntimeError: expected mat1 and mat2 to have the same dtype, got float != c10::Half
+        # Fix: always load DePlot in float32 so model and inputs share the same dtype.
         if _deplot_model is None:
-            logger.info("Loading DePlot: %s  (device=%s) …", _DEPLOT_MODEL_ID, _device)
+            logger.info("Loading DePlot: %s  (device=%s, dtype=float32) …", _DEPLOT_MODEL_ID, _device)
             try:
                 _deplot_processor = AutoProcessor.from_pretrained(_DEPLOT_MODEL_ID)
                 _deplot_model = Pix2StructForConditionalGeneration.from_pretrained(
                     _DEPLOT_MODEL_ID,
-                    torch_dtype=dtype,
+                    torch_dtype=torch.float32,   # must match processor output dtype
                 )
                 _deplot_model.to(_device)
                 _deplot_model.eval()
-                logger.info("DePlot loaded ✓  (device=%s)", _device)
+                logger.info(
+                    "DePlot loaded ✓  (device=%s, dtype=%s)",
+                    _device, _deplot_model.dtype,
+                )
             except Exception as exc:
                 logger.warning(
                     "DePlot failed to load — charts will fall back to Qwen2-VL. Error: %s", exc
@@ -264,11 +271,28 @@ def _run_deplot(image_bytes: bytes) -> Optional[str]:
                 Image.LANCZOS,
             )
 
+        logger.info("Running DePlot inference …")
+
+        # Step 1: encode
         inputs = _deplot_processor(
             images=img,
             text=_DEPLOT_PROMPT,
             return_tensors="pt",
-        ).to(_device)
+        )
+
+        # Step 2: move to correct device
+        inputs = {k: v.to(_deplot_model.device) for k, v in inputs.items()}
+
+        # Step 3: cast every floating-point tensor to the model's dtype.
+        # This is the belt-and-suspenders guard against the:
+        #   RuntimeError: expected mat1 and mat2 to have the same dtype,
+        #   but got: float != c10::Half
+        # error that occurs when model dtype ≠ processor output dtype.
+        model_dtype = _deplot_model.dtype
+        inputs = {
+            k: v.to(dtype=model_dtype) if (hasattr(v, "dtype") and v.is_floating_point()) else v
+            for k, v in inputs.items()
+        }
 
         with torch.no_grad():
             generated_ids = _deplot_model.generate(
@@ -279,6 +303,8 @@ def _run_deplot(image_bytes: bytes) -> Optional[str]:
         raw = _deplot_processor.batch_decode(
             generated_ids, skip_special_tokens=True
         )[0].strip()
+
+        logger.info("DePlot extracted chart data successfully")
 
         # Reformat DePlot's pipe-separated output into a readable structure.
         return _format_deplot_output(raw)
