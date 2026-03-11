@@ -70,13 +70,18 @@ _qwen_model       = None
 _device           = None        # shared: 'cuda' or 'cpu'
 _load_lock        = threading.Lock()
 
-# ── Chart-detection keyword set ───────────────────────────────────────────────
-_CHART_CAPTION_KEYWORDS = {
-    "graph", "curve", "plot", "vs", "versus", "characteristics",
-    "temperature", "current", "voltage", "power", "efficiency",
-    "dissipation", "switching", "capacitance", "impedance", "frequency",
-    "drain", "gate", "source", "transfer", "output", "soa",
-    "safe operating", "thermal", "resistance", "response", "bandwidth",
+# ── Graph-detection keyword set ───────────────────────────────────────────────
+# Only phrases that are unambiguously associated with axis-bearing charts/plots.
+# Generic single-word terms like 'output', 'resistance', 'temperature'
+# are intentionally excluded — they also appear in table captions and would
+# incorrectly route table images to DePlot.
+_GRAPH_CAPTION_KEYWORDS = {
+    "graph", "curve", "plot", "vs.", "versus",
+    "power derating", "gate charge", "output characteristic",
+    "transfer characteristic", "safe operating area", "soa",
+    "switching waveform", "capacitance vs", "impedance vs",
+    "frequency response", "temperature coefficient",
+    "drain current vs", "power dissipation vs",
 }
 
 
@@ -164,7 +169,7 @@ def _load_all_models() -> None:
 # ═════════════════════════════════════════════════════════════════════════════
 
 def classify_figure(image_bytes: bytes, caption: str = "") -> str:
-    """Classify a figure as either 'chart' or 'diagram'.
+    """Classify a figure as either 'graph' or 'diagram'.
 
     Parameters
     ----------
@@ -173,17 +178,23 @@ def classify_figure(image_bytes: bytes, caption: str = "") -> str:
 
     Returns
     -------
-    'chart'   — axis-bearing graph/plot; route to DePlot.
-    'diagram' — circuit drawing, package outline, block diagram; route to Qwen2-VL.
+    'graph'   — axis-bearing chart/plot; route to DePlot.
+    'diagram' — circuit drawing, package outline, block diagram, table image;
+                route to Qwen2-VL.
     """
-    # 1. Caption keyword check (fast, no image decoding)
+    # 1. Caption keyword check (fast, no image decoding).
+    #    Only fire on phrases that are unambiguously graph-related;
+    #    generic keywords like 'output' or 'resistance' are intentionally
+    #    excluded to avoid routing table images to DePlot.
     cap_lower = caption.lower()
-    if any(kw in cap_lower for kw in _CHART_CAPTION_KEYWORDS):
-        logger.debug("classify_figure → chart  (caption keyword match)")
-        return "chart"
+    if any(kw in cap_lower for kw in _GRAPH_CAPTION_KEYWORDS):
+        logger.debug("classify_figure → graph  (caption keyword match: %r)", caption[:60])
+        return "graph"
 
-    # 2. Simple pixel heuristic: look for near-horizontal / near-vertical
-    #    lines that suggest axes or grid lines (uses basic numpy, no CV2 needed).
+    # 2. Pixel heuristic — detect axis-like long continuous lines.
+    #    Tables also have borders, so thresholds are deliberately conservative:
+    #      • ≥ 5 rows spanning > 60% of width  (table would have 2-3 borders max)
+    #      • ≥ 4 cols spanning > 60% of height
     try:
         from PIL import Image
         import numpy as np
@@ -196,48 +207,46 @@ def classify_figure(image_bytes: bytes, caption: str = "") -> str:
             scale = max_w / img.width
             img   = img.resize((max_w, int(img.height * scale)), Image.LANCZOS)
 
-        arr    = np.array(img, dtype=np.float32)
-        # Threshold: pixels < 128 → dark (potential ink / line)
-        dark   = (arr < 128).astype(np.uint8)
+        arr  = np.array(img, dtype=np.float32)
+        dark = (arr < 128).astype(np.uint8)   # dark pixels = potential ink
+        h, w = dark.shape
 
-        h, w   = dark.shape
-        # Row sums: a long horizontal dark line → axis or grid
-        row_sum = dark.sum(axis=1)           # shape (h,)
-        # Col sums: a long vertical dark line → axis
-        col_sum = dark.sum(axis=0)           # shape (w,)
+        row_sum = dark.sum(axis=1)   # horizontal line detector
+        col_sum = dark.sum(axis=0)   # vertical line detector
 
-        # Heuristic: if ≥3 rows span > 60% of width → strong horizontal structure
-        long_h_lines = (row_sum > 0.60 * w).sum()
-        # Heuristic: if ≥3 cols span > 60% of height → strong vertical structure
-        long_v_lines = (col_sum > 0.60 * h).sum()
+        # Conservative thresholds: tables rarely have > 4 full-width border rows
+        long_h_lines = int((row_sum > 0.60 * w).sum())
+        long_v_lines = int((col_sum > 0.60 * h).sum())
 
-        if long_h_lines >= 3 or long_v_lines >= 3:
+        if long_h_lines >= 5 or long_v_lines >= 4:
             logger.debug(
-                "classify_figure → chart  (pixel heuristic: h_lines=%d, v_lines=%d)",
+                "classify_figure → graph  (pixel heuristic: h_lines=%d, v_lines=%d)",
                 long_h_lines, long_v_lines,
             )
-            return "chart"
+            return "graph"
 
-        # 3. Numeric density check: many digit-like pixels near the edges
-        #    (axis tick labels) suggests a chart.
-        # (Lightweight proxy: check corner quadrant darker pixel fraction)
+        # 3. Edge-density heuristic: axis tick labels leave a dense dark strip
+        #    along the left and bottom edges of a graph image.
+        #    Threshold raised to 0.65 (sum of 4 edge strip means) to avoid
+        #    triggering on tables that have text in header / footer rows.
         edge_rows  = max(1, h // 8)
         edge_cols  = max(1, w // 8)
-        top_strip  = dark[:edge_rows, :].mean()
-        bot_strip  = dark[h - edge_rows:, :].mean()
-        left_strip = dark[:, :edge_cols].mean()
-        rgt_strip  = dark[:, w - edge_cols:].mean()
+        top_strip  = float(dark[:edge_rows, :].mean())
+        bot_strip  = float(dark[h - edge_rows:, :].mean())
+        left_strip = float(dark[:, :edge_cols].mean())
+        rgt_strip  = float(dark[:, w - edge_cols:].mean())
 
-        if (top_strip + bot_strip + left_strip + rgt_strip) > 0.40:
+        edge_density = top_strip + bot_strip + left_strip + rgt_strip
+        if edge_density > 0.65:
             logger.debug(
-                "classify_figure → chart  (dense edge labels heuristic)"
+                "classify_figure → graph  (edge-density heuristic: %.3f)", edge_density
             )
-            return "chart"
+            return "graph"
 
     except Exception as exc:
         logger.debug("Pixel-heuristic failed (continuing): %s", exc)
 
-    logger.debug("classify_figure → diagram  (no chart features detected)")
+    logger.debug("classify_figure → diagram  (no graph features detected)")
     return "diagram"
 
 
@@ -518,11 +527,11 @@ class FigureAnalyzer:
 
         vision_text: Optional[str] = None
 
-        if figure_type == "chart":
+        if figure_type == "graph":
             vision_text = _run_deplot(image_bytes)
             if vision_text is None:
                 logger.warning(
-                    "DePlot returned None for chart on page %s — falling back to Qwen2-VL", page
+                    "DePlot returned None for graph on page %s — falling back to Qwen2-VL", page
                 )
                 vision_text = _run_qwen2vl(image_bytes)
         else:
@@ -609,8 +618,10 @@ class FigureAnalyzer:
     ) -> str:
         """Assemble the structured chunk string for ChromaDB storage."""
         type_label = {
-            "chart":   "Graph",
+            "graph":   "Graph",
             "diagram": "Diagram",
+            # backward-compat alias in case old callers pass 'chart'
+            "chart":   "Graph",
         }.get(figure_type, "Figure")
 
         header_lines = [

@@ -85,34 +85,6 @@ def _is_count_graph_query(query: str) -> bool:
     return has_count and has_graph
 
 
-def _build_retrieval(query: str, top_k: int, component_filter: str | None):
-    """Retrieve context for a user query with graph-aware strategy.
-
-    Retrieval modes
-    ───────────────
-    • Count query  ("how many graphs"):
-          Uses collection.get(where={"type": "figure"}) to fetch ALL figure
-          chunks deterministically — no vector similarity, no LLM guessing.
-
-    • Graph query  ("explain the graphs", "list the graphs"):
-          Fetches ALL figure chunks via metadata filter so every figure is
-          surfaced, then also runs a standard semantic pass and merges.
-
-    • Normal query:
-          Standard top-k vector similarity retrieval.
-    """
-    store = ChromaStore(
-        persist_dir=Path(config.chroma_persist_dir),
-        collection_name=config.chroma_collection,
-    )
-    embedder = get_embedder()
-    retriever = Retriever(
-        vector_store=store,
-        embedder=embedder,
-        config=RetrieverConfig(top_k=top_k),
-    )
-
-
 def _get_all_figure_chunks(
     store: "ChromaStore", component_filter: str | None
 ) -> list[dict]:
@@ -168,7 +140,7 @@ def _get_all_figure_chunks(
     for field in ("type", "chunk_type"):
         try:
             raw   = collection.get(
-                where=_base_filter(field),
+                where=_build_base_filter(field),
                 include=["documents", "metadatas", "ids"],
             )
             ids   = raw.get("ids",       []) or []
@@ -219,9 +191,36 @@ def _build_retrieval(query: str, top_k: int, component_filter: str | None):
             retrieved = _get_all_figure_chunks(store, component_filter)
             count = len(retrieved)
             logger.info("Count-graph query: found %d figure chunks", count)
+
+            # Only count actual 'graph' figure_type chunks if possible;
+            # fall back to total figure count when figure_type metadata is absent.
+            graph_only = [
+                r for r in retrieved
+                if (r.get("metadata") or {}).get("figure_type") == "graph"
+            ]
+            if graph_only:
+                graph_count = len(graph_only)
+                comp_label = f" for '{component_filter}'" if component_filter else ""
+                direct_answer = (
+                    f"There are {graph_count} graph{'' if graph_count == 1 else 's'} "
+                    f"in the datasheet{comp_label} "
+                    f"(plus {count - graph_count} other figure(s) such as circuit diagrams and package drawings)."
+                )
+            else:
+                comp_label = f" for '{component_filter}'" if component_filter else ""
+                direct_answer = (
+                    f"There are {count} figure{'' if count == 1 else 's'}/graph{'' if count == 1 else 's'} "
+                    f"in the datasheet{comp_label}."
+                )
+
             summary_text = (
-                f"Figure Count Summary: There are {count} figures/graphs "
-                f"in this datasheet for component '{component_filter or 'all'}'."
+                f"Figure Count Summary: {direct_answer}\n\n"
+                "Figure list:\n" +
+                "\n".join(
+                    f"- Figure {i+1} (page {(r.get('metadata') or {}).get('page', '?')}): "
+                    f"{(r.get('text') or '')[:120]}"
+                    for i, r in enumerate(retrieved[:30])
+                )
             )
             summary_doc = {
                 "id": "__figure_count_summary__",
@@ -232,30 +231,23 @@ def _build_retrieval(query: str, top_k: int, component_filter: str | None):
             retrieved = [summary_doc] + retrieved
         except Exception as exc:
             logger.warning("Count-graph retrieval failed, falling back to vector search: %s", exc)
+            direct_answer = None
             retrieved = retriever.retrieve(query=query, top_k=top_k, filters=None)
+        else:
+            # Return early with direct answer — no LLM needed for counting
+            sources = [
+                {
+                    "id":        d.get("id", ""),
+                    "text":      d.get("text", "")[:400],
+                    "score":     round(d.get("score", 0), 3),
+                    "component": (d.get("metadata") or {}).get("part_number", "unknown"),
+                    "section":   (d.get("metadata") or {}).get("section_name", ""),
+                    "type":      (d.get("metadata") or {}).get("chunk_type", ""),
+                }
+                for d in retrieved
+            ]
+            return direct_answer, sources, True  # True = direct_answer, skip LLM
 
-        max_ctx_chunks = len(retrieved)
-        pipeline = RAGPipeline(
-            retriever=retriever,
-            config=RAGConfig(
-                top_k=top_k,
-                max_context_chars=12000,
-                default_trimmed_chunks=max_ctx_chunks,
-            ),
-        )
-        assembled = pipeline.assemble_context(retrieved, max_context_chunks=max_ctx_chunks)
-        sources = [
-            {
-                "id":        d.get("id", ""),
-                "text":      d.get("text", "")[:400],
-                "score":     round(d.get("score", 0), 3),
-                "component": (d.get("metadata") or {}).get("part_number", "unknown"),
-                "section":   (d.get("metadata") or {}).get("section_name", ""),
-                "type":      (d.get("metadata") or {}).get("chunk_type", ""),
-            }
-            for d in assembled["used_docs"]
-        ]
-        return assembled["context"], sources
 
     # ── Pass 1: standard semantic retrieval ──────────────────────────────────
     part_filter = {"part_number": component_filter} if component_filter else None
@@ -302,7 +294,7 @@ def _build_retrieval(query: str, top_k: int, component_filter: str | None):
         }
         for d in assembled["used_docs"]
     ]
-    return assembled["context"], sources
+    return assembled["context"], sources, False
 
 
 # ── Core endpoints ────────────────────────────────────────────────────────────
@@ -331,8 +323,14 @@ def chat(req: ChatRequest):
     if not req.query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty.")
     try:
-        context, sources = _build_retrieval(req.query, req.top_k, req.component_filter)
+        result = _build_retrieval(req.query, req.top_k, req.component_filter)
+        context_or_answer, sources, is_direct = result
 
+        # Deterministic direct-answer path (e.g., graph count queries)
+        if is_direct:
+            return {"answer": context_or_answer, "sources": sources}
+
+        context = context_or_answer
         if not context:
             answer = "No relevant context found in the knowledge base for this query."
         else:
@@ -373,12 +371,20 @@ def chat_stream(req: ChatRequest):
             yield _keepalive()
 
             # ── 2. Retrieve & assemble context ───────────────────────────────────
-            context, sources = _build_retrieval(req.query, req.top_k, req.component_filter)
+            result = _build_retrieval(req.query, req.top_k, req.component_filter)
+            context_or_answer, sources, is_direct = result
 
             # ── 3. Send sources immediately so the UI shows them before generation
             yield _sse({"type": "sources", "sources": sources})
 
-            # ── 4. No context → short-circuit ────────────────────────────────────
+            # ── 4a. Deterministic direct answer (e.g., graph count) ───────────────
+            if is_direct:
+                yield _sse({"type": "token", "token": context_or_answer})
+                yield _sse({"type": "done"})
+                return
+
+            # ── 4b. No context → short-circuit ───────────────────────────────────
+            context = context_or_answer
             if not context:
                 yield _sse({"type": "token", "token": "No relevant context found in the knowledge base for this query."})
                 yield _sse({"type": "done"})
@@ -418,6 +424,64 @@ def chat_stream(req: ChatRequest):
         },
     )
 
+
+
+# ── Figure / graph metadata endpoints ─────────────────────────────────────────
+
+@app.get("/figures")
+def get_figures(component: str | None = None):
+    """Return all figure chunks with structured metadata.
+
+    Query params
+    ────────────
+    component : Optional part_number to filter by component.
+
+    Response
+    ────────
+    {
+        "total_figures": int,
+        "graph_count":   int,
+        "diagram_count": int,
+        "figures": [
+            {
+                "id":          str,
+                "figure_type": str,   # "graph" | "diagram" | "unknown"
+                "page":        int | None,
+                "caption":     str,
+                "component":   str,
+                "text":        str,   # first 300 chars of chunk text
+            }
+        ]
+    }
+    """
+    try:
+        store = ChromaStore(
+            persist_dir=Path(config.chroma_persist_dir),
+            collection_name=config.chroma_collection,
+        )
+        chunks = _get_all_figure_chunks(store, component)
+        figures = []
+        for ch in chunks:
+            meta = ch.get("metadata") or {}
+            figures.append({
+                "id":          ch.get("id", ""),
+                "figure_type": meta.get("figure_type", "unknown"),
+                "page":        meta.get("page"),
+                "caption":     meta.get("caption", ""),
+                "component":   meta.get("part_number", "unknown"),
+                "text":        (ch.get("text") or "")[:300],
+            })
+        graph_count   = sum(1 for f in figures if f["figure_type"] == "graph")
+        diagram_count = sum(1 for f in figures if f["figure_type"] == "diagram")
+        return {
+            "total_figures": len(figures),
+            "graph_count":   graph_count,
+            "diagram_count": diagram_count,
+            "figures":       figures,
+        }
+    except Exception as exc:
+        logger.error("Figures endpoint error: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 # ── Library endpoints ─────────────────────────────────────────────────────────

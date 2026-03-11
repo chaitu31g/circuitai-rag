@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class RAGConfig:
-    top_k: int = 5
+    top_k: int = 25
     max_context_chars: int = 6000
     default_trimmed_chunks: int = 2
     deduplicate_context: bool = True

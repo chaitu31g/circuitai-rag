@@ -17,7 +17,7 @@ from rag_pipeline.vectordb.base import VectorStore
 class RetrieverConfig:
     """Settings for vector retrieval."""
 
-    top_k: int = 5
+    top_k: int = 25
 
 
 class QueryEmbedder(Protocol):

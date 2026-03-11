@@ -246,12 +246,16 @@ def chunk_figure(
         else:
             figure_type = "unknown"
     else:
-        # Caption-based fallback classification
-        _chart_kw = {
-            "graph", "curve", "plot", "vs", "characteristics", "temperature",
-            "current", "voltage", "power", "efficiency", "soa", "switching",
+        # Caption-based fallback when vision analysis failed.
+        # Uses tighter phrases (not single words) to avoid tagging table images as graphs.
+        _graph_kw = {
+            "graph", "curve", "plot", "versus", "vs.",
+            "power derating", "gate charge", "output characteristic",
+            "transfer characteristic", "safe operating", "soa",
+            "switching waveform", "frequency response",
+            "drain current vs", "power dissipation vs",
         }
-        figure_type = "graph" if any(kw in cap_text.lower() for kw in _chart_kw) else "diagram"
+        figure_type = "graph" if any(kw in cap_text.lower() for kw in _graph_kw) else "diagram"
 
     # ── Build chunk text ───────────────────────────────────────────────────────
     # FigureAnalyzer returns structured text; use it directly if available.

@@ -121,9 +121,16 @@ class ChromaStore(VectorStore):
         filters: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """Nearest-neighbour search. Returns list of result dicts."""
+        # ChromaDB raises an error if n_results > collection size.
+        # Clamp n_results to the current document count (minimum 1).
+        total = self._collection.count()
+        if total == 0:
+            return []
+        effective_n = max(1, min(n_results, total))
+
         results = self._collection.query(
             query_embeddings=[query_embedding],
-            n_results=n_results,
+            n_results=effective_n,
             where=filters,
         )
 
