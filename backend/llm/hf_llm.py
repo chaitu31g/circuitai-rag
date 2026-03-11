@@ -43,8 +43,7 @@ except ImportError:
     _SYNTHESIS_SYSTEM = (
         "You are an expert electronics engineer analyzing a semiconductor datasheet. "
         "You will receive section-level summaries covering different aspects of the component. "
-        "Your task is to synthesize the information ACROSS all sections to answer the question. "
-        "Never copy a section verbatim — always reason, combine, and explain. "
+        "Your task is to synthesize the information ACROSS all sections to provide a direct, concise answer. "
         "Preserve all numeric values, units, and conditions accurately. "
         "If a value is absent from all sections, say so clearly."
     )
@@ -54,16 +53,10 @@ except ImportError:
         user_content = (
             "Below are section-level summaries of a semiconductor datasheet.\n"
             "Each section covers a different aspect of the component.\n\n"
-            "Your task:\n"
-            "1. Read ALL section summaries before forming your answer.\n"
-            "2. Reason ACROSS sections — combine related information logically.\n"
-            "3. Cite specific values, units, and conditions from the summaries.\n"
-            "4. Do NOT repeat summary text verbatim — synthesize and explain.\n"
-            "5. Ignore sections not relevant to the question.\n"
-            "6. Do NOT invent values not present in the summaries.\n\n"
+            "Synthesize the relevant information from these sections into a complete, direct answer. "
+            "Cite specific values, units, and conditions from the summaries.\n\n"
             f"Datasheet Section Summaries:\n{section_context}\n\n"
-            f"Question:\n{query}\n\n"
-            "Answer:"
+            f"Question:\n{query}"
         )
         return [
             {"role": "system", "content": _SYNTHESIS_SYSTEM},
