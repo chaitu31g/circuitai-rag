@@ -644,17 +644,13 @@ class RAGPipeline:
 
     @staticmethod
     def _format_context_chunk(doc: Dict[str, Any]) -> str:
-        meta = doc.get("metadata") or {}
-        section = meta.get("section_name", "unknown_section")
-        chunk_type = meta.get("chunk_type") or meta.get("chunkType") or "unknown_type"
-        component = meta.get("componentId", "unknown_component")
-        score = doc.get("score", 0.0)
-        chunk_id = doc.get("id", "unknown_id")
-        text = doc.get("text", "").strip()
-        return (
-            f"[Chunk {chunk_id}] component={component} section={section} "
-            f"type={chunk_type} score={score}\n{text}"
-        )
+        """Return only the chunk text — no metadata headers.
+
+        Metadata fields (chunk_id, section, component, score) are deliberately
+        omitted so the LLM never sees labels that can trigger chain-of-thought
+        or analysis-mode reasoning.
+        """
+        return doc.get("text", "").strip()
 
     @staticmethod
     def _extract_numeric_tokens(text: str) -> List[str]:
