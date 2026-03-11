@@ -38,10 +38,12 @@ _SYSTEM_PROMPT = (
     "You are an expert electronics engineer answering questions based solely on the provided datasheet context. "
     "Provide your answer immediately and directly. "
     "Never invent, estimate, or infer values not present in the context. "
-    "If the answer cannot be found in the provided context, say so clearly."
+    "If the answer cannot be found in the provided context, say so clearly. "
+    "CRITICAL INSTRUCTION: DO NOT output any thinking process, step-by-step analysis, rationale, or drafts. Output EXACTLY AND ONLY the final direct answer."
 )
 
 # Reasoning-step patterns to strip from model output.
+# Matches blocks starting with "Thinking Process" or similar until we see a final "Answer:" or "Draft X:"
 _REASONING_PATTERNS = (
     r"(?im)^\s*\*?\*?(?:step\s*\d+|analyze the request|review the context?"
     r"|thinking process|analysis|extract features|identify relevant)"
@@ -119,6 +121,8 @@ def build_prompt(context: str, query: str) -> list[dict]:
         "You are an expert electronics engineer.\n\n"
         "Provide a concise, direct technical explanation (2-4 sentences) answering the user's question. "
         "Base your entire answer strictly on the datasheet context below.\n\n"
+        "IMPORTANT: DO NOT include any chain-of-thought, 'Thinking Process', step-by-step analysis, or drafts in your response. "
+        "Output ONLY the final answer.\n\n"
         f"Datasheet Context:\n{context}\n\n"
         f"Question:\n{query}"
     )
@@ -143,13 +147,15 @@ def build_synthesis_prompt(section_context: str, query: str) -> list[dict]:
         "You will receive section-level summaries covering different aspects of the component. "
         "Your task is to synthesize the information ACROSS all sections to provide a direct, concise answer. "
         "Preserve all numeric values, units, and conditions accurately. "
-        "If a value is absent from all sections, say so clearly."
+        "If a value is absent from all sections, say so clearly. "
+        "CRITICAL INSTRUCTION: DO NOT output any thinking process, step-by-step analysis, rationale, or drafts. Output EXACTLY AND ONLY the final direct answer."
     )
     user_content = (
         "Below are section-level summaries of a semiconductor datasheet.\n"
         "Each section covers a different aspect of the component.\n\n"
         "Synthesize the relevant information from these sections into a complete, direct answer. "
         "Cite specific values, units, and conditions from the summaries.\n\n"
+        "IMPORTANT: DO NOT output any reasoning steps, 'Thinking Process', or drafts. Output ONLY the final analytical answer.\n\n"
         f"Datasheet Section Summaries:\n{section_context}\n\n"
         f"Question:\n{query}"
     )
@@ -181,6 +187,21 @@ def _filter_reasoning_steps(text: str) -> str:
     """
     import re
 
+    # Remove the entire block starting with "Thinking Process" or "Analysis" until "Draft"
+    # or until the actual answer begins. Try a more aggressive match for the whole thinking block.
+    # Often, models will generate "Thinking Process:... Draft 1: <answer>"
+    # Let's try to strip everything before the final answer if it looks like a thinking process.
+    if re.search(r"(?i)thinking process|analyze the request", text):
+        # Look for "Draft 1:", "Answer:", "Synthesize the Answer:", or "Final Answer:"
+        match = re.search(r"(?im)(?:draft\s*\d+|final answer|answer):(.*)", text, re.DOTALL)
+        if match:
+            # We found a clear delimiter for the final answer.
+            text = match.group(1).strip()
+        else:
+            # If no clear delimiter, let's try to remove numbered lists and bullet points heavily
+            # up to the last paragraph. This is harder. For now, try our best to remove common headers.
+            pass
+
     # Phase 1 – remove numbered / bulleted reasoning headers and their body.
     # Matches lines like: "1. Analyze the Request", "**Step 2**", "## Analysis"
     heading_re = re.compile(
@@ -201,6 +222,11 @@ def _filter_reasoning_steps(text: str) -> str:
         r"[^\n]*\n?"                         # rest of line
     )
     cleaned = heading_re.sub("", text)
+    
+    # Aggressively remove all lines that just list facts like "* Role: Expert Electronics Engineer."
+    # if they are part of a meta analysis block.
+    meta_re = re.compile(r"(?im)^[ \t]*\*[ \t]*(?:Role|Task|Constraint|Input Data|Look for):[^\n]*\n?", re.IGNORECASE)
+    cleaned = meta_re.sub("", cleaned)
 
     # Phase 2 – collapse multiple blank lines left by removal.
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)

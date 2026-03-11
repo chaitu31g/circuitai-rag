@@ -45,7 +45,8 @@ except ImportError:
         "You will receive section-level summaries covering different aspects of the component. "
         "Your task is to synthesize the information ACROSS all sections to provide a direct, concise answer. "
         "Preserve all numeric values, units, and conditions accurately. "
-        "If a value is absent from all sections, say so clearly."
+        "If a value is absent from all sections, say so clearly. "
+        "CRITICAL INSTRUCTION: DO NOT output any thinking process, step-by-step analysis, rationale, or drafts. Output EXACTLY AND ONLY the final direct answer."
     )
 
     def build_synthesis_prompt(section_context: str, query: str) -> list[dict]:  # noqa: F811
@@ -55,6 +56,7 @@ except ImportError:
             "Each section covers a different aspect of the component.\n\n"
             "Synthesize the relevant information from these sections into a complete, direct answer. "
             "Cite specific values, units, and conditions from the summaries.\n\n"
+            "IMPORTANT: DO NOT output any reasoning steps, 'Thinking Process', or drafts. Output ONLY the final analytical answer.\n\n"
             f"Datasheet Section Summaries:\n{section_context}\n\n"
             f"Question:\n{query}"
         )
