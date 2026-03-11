@@ -88,7 +88,7 @@ def is_graph_query(query: str) -> bool:
 class RetrieverConfig:
     """Settings for vector retrieval."""
 
-    top_k: int = 25
+    top_k: int = 50
 
 
 class QueryEmbedder(Protocol):

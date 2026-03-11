@@ -57,6 +57,21 @@ RAG_ANSWER_SYSTEM_PROMPT = (
     "Concise technical datasheet explanation using retrieved values."
 )
 
+SECTION_SYNTHESIS_SYSTEM_PROMPT = (
+    "You are an expert electronics engineer analyzing a semiconductor datasheet.\n\n"
+    "You will receive section-level summaries of the datasheet, each covering a different\n"
+    "aspect of the component (features, electrical characteristics, graphs, tables, etc.).\n\n"
+    "Instructions:\n\n"
+    "1. Read ALL section summaries before answering.\n"
+    "2. Synthesize the information ACROSS sections to form a complete, reasoned answer.\n"
+    "3. Do NOT simply copy text from one summary — combine and explain logically.\n"
+    "4. Preserve all important numeric values, units, and operating conditions.\n"
+    "5. If a section is not relevant to the question, note it briefly and focus on what is.\n"
+    "6. Do NOT invent, estimate, or infer values absent from the summaries.\n"
+    "7. If the answer cannot be determined from the summaries, state that clearly.\n\n"
+    "Answer style: A clear, structured technical explanation — not bullet-point repetition."
+)
+
 
 @dataclass
 class PromptParts:
@@ -194,6 +209,53 @@ class DatasheetPromptBuilder:
         )
         return PromptParts(
             system=RAG_ANSWER_SYSTEM_PROMPT,
+            user=user_prompt,
+            full_prompt=full_prompt,
+        )
+
+    def build_section_synthesis_prompt(
+        self,
+        query: str,
+        section_context: str,
+        section_names: Optional[List[str]] = None,
+    ) -> PromptParts:
+        """Build the final reasoning prompt for the section-summarization pipeline.
+
+        ``section_context`` is expected to be a structured block produced by
+        ``SectionSummarizer.build_summarized_context()``, with ``## Heading``
+        separators for each datasheet section.
+
+        The model is instructed to reason *across* all sections rather than
+        extracting answers from a single chunk.
+        """
+        sections_note = (
+            f"Sections available: {', '.join(section_names)}.\n"
+            if section_names
+            else ""
+        )
+
+        user_prompt = (
+            "Below are section-level summaries of a semiconductor datasheet.\n"
+            "Each section covers a different aspect of the component.\n\n"
+            f"{sections_note}"
+            "Your task:\n"
+            "1. Read ALL section summaries carefully.\n"
+            "2. Reason ACROSS sections to produce a complete, integrated answer.\n"
+            "3. Cite specific values, units, and conditions from the summaries.\n"
+            "4. Do NOT copy summary text verbatim — synthesize and explain.\n"
+            "5. If a section is irrelevant to the question, ignore it.\n"
+            "6. Do NOT invent values not present in the summaries.\n\n"
+            f"Question:\n{query}\n\n"
+            f"Datasheet Section Summaries:\n{section_context}\n\n"
+            "Answer:"
+        )
+
+        full_prompt = self._to_full_prompt(
+            system=SECTION_SYNTHESIS_SYSTEM_PROMPT,
+            user=user_prompt,
+        )
+        return PromptParts(
+            system=SECTION_SYNTHESIS_SYSTEM_PROMPT,
             user=user_prompt,
             full_prompt=full_prompt,
         )

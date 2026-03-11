@@ -12,7 +12,7 @@ from pydantic import BaseModel
 
 from backend.config import config
 from backend.models import create_job, get_job, update_job, jobs_db, IngestionJob, JobStatus
-from backend.llm.hf_llm import load_model_once, generate_response, stream_response, build_prompt
+from backend.llm.hf_llm import load_model_once, generate_response, stream_response, build_prompt, build_synthesis_prompt
 from rag_pipeline.services.ingest_service import ingest_pdf_pipeline, get_embedder
 from rag_pipeline.vectordb.chroma_store import ChromaStore
 from rag_pipeline.rag.rag_pipeline import RAGPipeline, RAGConfig
@@ -271,17 +271,20 @@ def _build_retrieval(query: str, top_k: int, component_filter: str | None):
             logger.warning("Figure metadata retrieval failed (non-fatal): %s", exc)
 
     # ── Context assembly ──────────────────────────────────────────────────────
-    max_ctx_chunks = 20 if _is_graph_query(query) else 8
-
+    # No hard chunk cap here; rely on max_context_chars=12000 to bound size.
+    # The section-summarization path (_build_retrieval_and_summarize) handles
+    # its own budget via the reranker + SectionSummarizer.
     pipeline = RAGPipeline(
         retriever=retriever,
         config=RAGConfig(
             top_k=top_k,
-            max_context_chars=10000,
-            default_trimmed_chunks=max_ctx_chunks,
+            max_context_chars=12000,
         ),
     )
-    assembled = pipeline.assemble_context(retrieved, max_context_chunks=max_ctx_chunks)
+    max_ctx = None  # let assemble_context use char budget instead of hard chunk cap
+    if _is_graph_query(query):
+        max_ctx = 20  # keep graph path bounded since it injects ALL figures
+    assembled = pipeline.assemble_context(retrieved, max_context_chunks=max_ctx)
 
     sources = [
         {
@@ -295,6 +298,123 @@ def _build_retrieval(query: str, top_k: int, component_filter: str | None):
         for d in assembled["used_docs"]
     ]
     return assembled["context"], sources, False
+
+
+def _build_retrieval_and_summarize(
+    query: str,
+    top_k: int,
+    component_filter: str | None,
+) -> tuple:
+    """New-architecture pipeline: 50-chunk retrieval → reranker → section summarization.
+
+    Steps
+    ─────
+    1. Retrieve top-50 chunks (wide pool).
+    2. Rerank with CrossEncoderReranker → top-20 most relevant chunks.
+    3. Group chunks by section (features, electrical_characteristics, etc.).
+    4. Summarize each section independently via LLM.
+    5. Return structured multi-section context + sources.
+    """
+    from functools import partial
+    from rag_pipeline.rag.rag_pipeline import SectionSummarizer
+    from rag_pipeline.rag.reranker import CrossEncoderReranker
+
+    store = ChromaStore(
+        persist_dir=Path(config.chroma_persist_dir),
+        collection_name=config.chroma_collection,
+    )
+    embedder = get_embedder()
+    retriever = Retriever(
+        vector_store=store,
+        embedder=embedder,
+        config=RetrieverConfig(top_k=top_k),
+    )
+
+    # ── Deterministic graph-count shortcut (unchanged) ────────────────────────
+    if _is_count_graph_query(query):
+        # Delegate to original path — no summarization needed for counting
+        return _build_retrieval(query, top_k, component_filter)
+
+    # ── Step 1: Retrieve top-50 ───────────────────────────────────────────────
+    part_filter = {"part_number": component_filter} if component_filter else None
+    retrieved = retriever.retrieve(query=query, top_k=top_k, filters=part_filter)
+
+    # Inject ALL figure chunks for graph queries
+    if _is_graph_query(query):
+        try:
+            figure_chunks = _get_all_figure_chunks(store, component_filter)
+            seen_ids = {d.get("id") for d in retrieved}
+            for chunk in figure_chunks:
+                if chunk.get("id") not in seen_ids:
+                    retrieved.append(chunk)
+                    seen_ids.add(chunk.get("id"))
+        except Exception as exc:
+            logger.warning("Figure metadata retrieval failed (non-fatal): %s", exc)
+
+    if not retrieved:
+        return "No relevant context found in the knowledge base for this query.", [], False
+
+    # ── Step 2: Rerank → top-20 ───────────────────────────────────────────────
+    reranker = CrossEncoderReranker(model_name="BAAI/bge-reranker-base")
+    try:
+        reranked = reranker.rerank(
+            query=query,
+            documents=retrieved,
+            top_n=min(20, len(retrieved)),
+        )
+        logger.info(
+            "Reranker: %d → %d chunks", len(retrieved), len(reranked)
+        )
+    except Exception as exc:
+        logger.warning("Reranker unavailable, using retrieval order: %s", exc)
+        reranked = retrieved[:20]
+
+    # Sources built from reranked set (before summarization)
+    sources = [
+        {
+            "id":        d.get("id", ""),
+            "text":      d.get("text", "")[:400],
+            "score":     round(d.get("score", d.get("final_score", 0)), 3),
+            "component": (d.get("metadata") or {}).get("part_number", "unknown"),
+            "section":   (d.get("metadata") or {}).get("section_name", ""),
+            "type":      (d.get("metadata") or {}).get("chunk_type", ""),
+        }
+        for d in reranked
+    ]
+
+    # ── Step 3+4: Section grouping + LLM summarization ───────────────────────
+    def _llm_fn(prompt_str: str) -> str:
+        """Wrap generate_response for a plain-string prompt in the section summarizer."""
+        from backend.llm.hf_llm import generate_response as _gen
+        # build_prompt expects (context, query) but summarization prompts are self-contained;
+        # pass the full prompt as context with an empty query sentinel.
+        msgs = [
+            {"role": "system", "content": "You are an expert electronics engineer."},
+            {"role": "user",   "content": prompt_str},
+        ]
+        return _gen(
+            prompt=msgs,
+            model_id=config.hf_model,
+            max_new_tokens=200,
+            temperature=0.3,
+        )
+
+    summarizer = SectionSummarizer(
+        llm_fn=_llm_fn,
+        max_new_tokens=200,
+        temperature=0.3,
+    )
+    section_context, summaries = summarizer.build_summarized_context(reranked)
+    logger.info(
+        "Section summarization complete: sections=%s", list(summaries.keys())
+    )
+
+    if not section_context.strip():
+        # Fallback: assemble raw context
+        raw_ctx = "\n\n".join((d.get("text") or "") for d in reranked[:8])
+        return raw_ctx, sources, False
+
+    return section_context, sources, False
 
 
 # ── Core endpoints ────────────────────────────────────────────────────────────
@@ -312,9 +432,10 @@ def health_check():
 class ChatRequest(BaseModel):
     query: str
     component_filter: str | None = None
-    top_k: int = 25         # raised to 25 — BGE-M3 benefits from a larger pool
+    top_k: int = 50         # raised to 50 — broader pool for summarization pipeline
     max_new_tokens: int = 512
     temperature: float = 0.2
+    use_section_summary: bool = False   # enable multi-step section summarization
 
 
 @app.post("/chat")
@@ -323,7 +444,10 @@ def chat(req: ChatRequest):
     if not req.query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty.")
     try:
-        result = _build_retrieval(req.query, req.top_k, req.component_filter)
+        if req.use_section_summary:
+            result = _build_retrieval_and_summarize(req.query, req.top_k, req.component_filter)
+        else:
+            result = _build_retrieval(req.query, req.top_k, req.component_filter)
         context_or_answer, sources, is_direct = result
 
         # Deterministic direct-answer path (e.g., graph count queries)
@@ -334,7 +458,10 @@ def chat(req: ChatRequest):
         if not context:
             answer = "No relevant context found in the knowledge base for this query."
         else:
-            prompt = build_prompt(context=context, query=req.query)
+            if req.use_section_summary:
+                prompt = build_synthesis_prompt(section_context=context, query=req.query)
+            else:
+                prompt = build_prompt(context=context, query=req.query)
             answer = generate_response(
                 prompt,
                 model_id=config.hf_model,
@@ -370,8 +497,11 @@ def chat_stream(req: ChatRequest):
             # ── 1. Keep connection alive during retrieval (can take a few seconds) ─
             yield _keepalive()
 
-            # ── 2. Retrieve & assemble context ───────────────────────────────────
-            result = _build_retrieval(req.query, req.top_k, req.component_filter)
+            # ── 2. Retrieve & assemble / summarize context ────────────────────────
+            if req.use_section_summary:
+                result = _build_retrieval_and_summarize(req.query, req.top_k, req.component_filter)
+            else:
+                result = _build_retrieval(req.query, req.top_k, req.component_filter)
             context_or_answer, sources, is_direct = result
 
             # ── 3. Send sources immediately so the UI shows them before generation
@@ -390,11 +520,13 @@ def chat_stream(req: ChatRequest):
                 yield _sse({"type": "done"})
                 return
 
-            # ── 5. Build prompt ──────────────────────────────────────────────────
-            prompt = build_prompt(context=context, query=req.query)
+            # ── 5. Build prompt (standard or synthesis) ──────────────────────────
+            if req.use_section_summary:
+                prompt = build_synthesis_prompt(section_context=context, query=req.query)
+            else:
+                prompt = build_prompt(context=context, query=req.query)
 
-            # ── 6. Stream tokens — send a keep-alive every 30 tokens so Cloudflare
-            #       doesn't drop the connection during slow GPU/CPU inference ──────
+            # ── 6. Stream tokens ─────────────────────────────────────────────────
             token_count = 0
             for token in stream_response(
                 prompt,

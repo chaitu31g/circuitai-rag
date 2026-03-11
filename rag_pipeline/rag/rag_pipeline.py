@@ -6,8 +6,8 @@ import json
 import logging
 import re
 import socket
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -22,8 +22,8 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class RAGConfig:
-    top_k: int = 25
-    max_context_chars: int = 6000
+    top_k: int = 50
+    max_context_chars: int = 12000
     default_trimmed_chunks: int = 2
     deduplicate_context: bool = True
     temperature: float = 0.2
@@ -31,6 +31,12 @@ class RAGConfig:
     reranker_model: str = "BAAI/bge-reranker-base"
     reranker_batch_size: int = 16
     reranker_blend_alpha: Optional[float] = None
+    # Section-summarization pipeline settings
+    summarize_sections: bool = False          # enable multi-step summarization
+    summary_max_new_tokens: int = 200         # per-section summary length
+    summary_temperature: float = 0.3         # slightly creative for synthesis
+    rerank_before_summary: bool = True        # run reranker → top-20 before grouping
+    rerank_top_n_for_summary: int = 20        # how many chunks to keep after reranking
 
 
 class OllamaClient:
@@ -94,6 +100,215 @@ class OllamaClient:
             ) from exc
         except json.JSONDecodeError as exc:
             raise RuntimeError("Invalid JSON received from Ollama API.") from exc
+
+
+# ── Section-level summarizer ───────────────────────────────────────────────────
+
+# Maps section_name metadata values → canonical bucket names
+_SECTION_BUCKETS: Dict[str, str] = {
+    "features":                    "features",
+    "highlights":                  "features",
+    "advantages":                  "features",
+    "electrical_characteristics":  "electrical_characteristics",
+    "absolute_maximum_ratings":    "electrical_characteristics",
+    "recommended_operating":       "electrical_characteristics",
+    "thermal_characteristics":     "electrical_characteristics",
+    "specifications":              "electrical_characteristics",
+    "figures_and_diagrams":        "figures_and_diagrams",
+    "figure":                      "figures_and_diagrams",
+    "tables":                      "tables",
+    "table":                       "tables",
+}
+
+
+def _bucket_for(doc: Dict[str, Any]) -> str:
+    """Return the logical section bucket for a chunk."""
+    meta = doc.get("metadata") or {}
+    section = (meta.get("section_name") or "").lower()
+    chunk_type = (meta.get("chunk_type") or meta.get("type") or "").lower()
+
+    if section in _SECTION_BUCKETS:
+        return _SECTION_BUCKETS[section]
+    if chunk_type in ("figure", "diagram"):
+        return "figures_and_diagrams"
+    if chunk_type == "table":
+        return "tables"
+    return "raw_text"
+
+
+class SectionSummarizer:
+    """Groups retrieved chunks by datasheet section and summarises each section.
+
+    Architecture
+    ────────────
+    1.  Group the top-N (post-rerank) chunks into five logical buckets:
+          • features
+          • electrical_characteristics
+          • figures_and_diagrams
+          • tables
+          • raw_text  (catch-all)
+
+    2.  For each non-empty bucket, concatenate all chunk texts and call the
+        LLM with a section-specific summarization prompt.  Each summary is
+        at most ``summary_max_new_tokens`` tokens so the step stays fast.
+
+    3.  Combine summaries into a structured multi-section context block that
+        the final reasoning step can parse and reason over holistically.
+
+    Parameters
+    ──────────
+    llm_fn : Callable[[str, ...], str]
+        Any callable that accepts a plain-string prompt and returns a string.
+        Typically ``qwen_llm.generate_response`` (via partial) or an
+        ``OllamaClient.generate`` wrapper.
+    max_new_tokens : int
+        Soft cap on per-section summary length.
+    temperature : float
+        Inference temperature for the summarization sub-calls.
+    """
+
+    _SECTION_LABELS: Dict[str, str] = {
+        "features":                   "Key Features & Highlights",
+        "electrical_characteristics": "Electrical Characteristics & Ratings",
+        "figures_and_diagrams":       "Graphs, Figures & Diagrams",
+        "tables":                     "Data Tables",
+        "raw_text":                   "General Description",
+    }
+
+    _SECTION_PROMPTS: Dict[str, str] = {
+        "features": (
+            "You are an electronics engineer.\n"
+            "Summarize the following datasheet FEATURES section for an engineer.\n"
+            "List the key features and advantages in clear technical bullet points.\n"
+            "Do NOT copy sentences verbatim — restate concisely.\n\n"
+            "Section text:\n{text}\n\nSummary:"
+        ),
+        "electrical_characteristics": (
+            "You are an electronics engineer.\n"
+            "Summarize the following datasheet ELECTRICAL CHARACTERISTICS section.\n"
+            "Include all important numeric values, units, conditions (min/typ/max).\n"
+            "Group logically by parameter type.\n"
+            "Do NOT invent or estimate missing values.\n\n"
+            "Section text:\n{text}\n\nSummary:"
+        ),
+        "figures_and_diagrams": (
+            "You are an electronics engineer.\n"
+            "Summarize the following datasheet GRAPHS AND FIGURES section.\n"
+            "Describe what each graph/figure represents and the key trend or value it shows.\n"
+            "Be concise — one sentence per figure/graph.\n\n"
+            "Section text:\n{text}\n\nSummary:"
+        ),
+        "tables": (
+            "You are an electronics engineer.\n"
+            "Summarize the following datasheet TABLES section.\n"
+            "Extract and list the most important parameter values and conditions.\n"
+            "Preserve units and limit types (min/max/typical).\n\n"
+            "Section text:\n{text}\n\nSummary:"
+        ),
+        "raw_text": (
+            "You are an electronics engineer.\n"
+            "Summarize the following datasheet section in plain technical English.\n"
+            "Focus on information useful to an engineer selecting or using this component.\n\n"
+            "Section text:\n{text}\n\nSummary:"
+        ),
+    }
+
+    def __init__(
+        self,
+        llm_fn: Callable[[str], str],
+        max_new_tokens: int = 200,
+        temperature: float = 0.3,
+    ) -> None:
+        self.llm_fn = llm_fn
+        self.max_new_tokens = max_new_tokens
+        self.temperature = temperature
+
+    # ── Public API ─────────────────────────────────────────────────────────────
+
+    def group_chunks(
+        self, docs: List[Dict[str, Any]]
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """Partition docs into section buckets."""
+        buckets: Dict[str, List[Dict[str, Any]]] = {
+            "features": [],
+            "electrical_characteristics": [],
+            "figures_and_diagrams": [],
+            "tables": [],
+            "raw_text": [],
+        }
+        for doc in docs:
+            buckets[_bucket_for(doc)].append(doc)
+        return buckets
+
+    def summarize_section(self, bucket_name: str, docs: List[Dict[str, Any]]) -> str:
+        """Produce a short LLM summary for a single section bucket.
+
+        Returns the raw section text (truncated) as a fallback if LLM fails.
+        """
+        combined = "\n\n".join(
+            (d.get("text") or "").strip() for d in docs if (d.get("text") or "").strip()
+        )
+        if not combined:
+            return ""
+
+        # Truncate to ~4000 chars to avoid blowing up the summarization call
+        if len(combined) > 4000:
+            combined = combined[:4000] + "\n[... truncated ...]"
+
+        prompt_template = self._SECTION_PROMPTS.get(bucket_name, self._SECTION_PROMPTS["raw_text"])
+        prompt = prompt_template.format(text=combined)
+
+        try:
+            summary = self.llm_fn(prompt)
+            return summary.strip() if summary else combined[:800]
+        except Exception as exc:
+            logger.warning(
+                "Section summarization failed for '%s' (falling back to raw text): %s",
+                bucket_name,
+                exc,
+            )
+            return combined[:800]
+
+    def build_summarized_context(
+        self,
+        docs: List[Dict[str, Any]],
+    ) -> Tuple[str, Dict[str, str]]:
+        """Run the full section-summarization pipeline.
+
+        Returns
+        -------
+        context_block : str
+            Structured multi-section text ready to feed into the final LLM.
+        summaries : dict
+            Mapping from bucket name → summary text (for diagnostics).
+        """
+        buckets = self.group_chunks(docs)
+        summaries: Dict[str, str] = {}
+        context_parts: List[str] = []
+
+        bucket_order = [
+            "features",
+            "electrical_characteristics",
+            "figures_and_diagrams",
+            "tables",
+            "raw_text",
+        ]
+
+        for bucket in bucket_order:
+            bucket_docs = buckets.get(bucket, [])
+            if not bucket_docs:
+                continue
+            label = self._SECTION_LABELS[bucket]
+            logger.info(
+                "Summarizing section '%s' (%d chunk(s))…", bucket, len(bucket_docs)
+            )
+            summary = self.summarize_section(bucket, bucket_docs)
+            if summary:
+                summaries[bucket] = summary
+                context_parts.append(f"## {label}\n{summary}")
+
+        context_block = "\n\n".join(context_parts)
+        return context_block, summaries
 
 
 class RAGPipeline:

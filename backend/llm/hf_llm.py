@@ -24,6 +24,7 @@ from rag_pipeline.models.qwen_llm import (  # noqa: F401
     MODEL_NAME as DEFAULT_MODEL,
     load_model_once,
     build_prompt,
+    build_synthesis_prompt,
     generate_response,
     stream_response,
 )
