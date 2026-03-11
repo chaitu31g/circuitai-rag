@@ -1,28 +1,33 @@
 """
 ingestion/vision/figure_analyzer.py
 ────────────────────────────────────────────────────────────────────────────
-Dual-model vision analyzer for electronics datasheet figures.
+Vision analyzer for electronics datasheet figures.
 
-Routing logic
-─────────────
-  • Charts / graphs (axis-bearing images)  →  google/deplot
-    DePlot is purpose-built for linearising chart images into a
-    structured key-value table, giving much richer axis/value extraction
-    than a generic VLM.
+Architecture (Qwen2-VL removed, DePlot only)
+─────────────────────────────────────────────
+  Caption/keyword classifier
+        │
+        ▼
+  figure_type = "graph" │ "diagram"
+        │
+        ├─ "graph"   → DePlot  (google/deplot)  extracts structured chart data
+        └─ "diagram" → caption-only  (no vision model needed)
 
-  • Diagrams, circuit drawings, package drawings  →  Qwen/Qwen2-VL-2B-Instruct
-    Qwen2-VL produces detailed natural-language descriptions of complex
-    visual elements that DePlot is not trained to handle.
+Diagrams (circuit drawings, package outlines, block diagrams) are now
+described using only their caption text. Qwen3.5-4B in the RAG chat layer
+provides any further reasoning or interpretation when a user asks about them.
+
+This removes the Qwen2-VL-2B-Instruct dependency entirely, which was the
+main source of GPU OOM errors on Colab T4s when DePlot was also loaded.
 
 Singleton pattern
 ─────────────────
-Both models are loaded exactly ONCE at process startup (thread-safe).
-Every call to FigureAnalyzer.analyze() reuses those shared instances.
-Never load models inside loops.
+DePlot is loaded exactly ONCE at process startup (thread-safe).
+Every call to FigureAnalyzer.analyze() reuses the shared instance.
 
 Output format
 ─────────────
-Regardless of which model was used, analyze() returns a structured
+Regardless of which path was taken, analyze() returns a structured
 string that becomes the chunk text stored in ChromaDB:
 
   Figure Type: Graph          ← or "Diagram"
@@ -30,7 +35,7 @@ string that becomes the chunk text stored in ChromaDB:
   Component: <part_number>
   Page: <n>
 
-  X-axis: ...                 ← DePlot path
+  X-axis: ...                 ← DePlot path (graphs only)
   Y-axis: ...
   Extracted Data:
     25°C → 3.0 A
@@ -39,8 +44,12 @@ string that becomes the chunk text stored in ChromaDB:
 
   ── or ──
 
-  Description:                ← Qwen2-VL path
-    <detailed description>
+  Figure Type: Diagram        ← caption-only path
+  Caption: <caption text>
+  Component: <part_number>
+  Page: <n>
+
+  Description: <caption repeated for embedding quality>
 """
 
 from __future__ import annotations
@@ -58,17 +67,13 @@ logger = logging.getLogger(__name__)
 
 # ── Model identifiers ─────────────────────────────────────────────────────────
 _DEPLOT_MODEL_ID = "google/deplot"
-_QWEN_MODEL_ID   = "Qwen/Qwen2-VL-2B-Instruct"
 
-# ── Module-level singletons — one set per model ───────────────────────────────
+# ── Module-level singletons ───────────────────────────────────────────────────
 _deplot_processor = None
 _deplot_model     = None
 
-_qwen_processor   = None
-_qwen_model       = None
-
-_device           = None        # shared: 'cuda' or 'cpu'
-_load_lock        = threading.Lock()
+_device    = None        # 'cuda' or 'cpu'
+_load_lock = threading.Lock()
 
 # ── Graph-detection keyword set ───────────────────────────────────────────────
 # Only phrases that are unambiguously associated with axis-bearing charts/plots.
@@ -82,30 +87,27 @@ _GRAPH_CAPTION_KEYWORDS = {
     "switching waveform", "capacitance vs", "impedance vs",
     "frequency response", "temperature coefficient",
     "drain current vs", "power dissipation vs",
+    # Extra broad keywords requested for improved recall
+    "vs", "characteristic", "temperature", "current", "voltage", "power",
 }
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# MODEL LOADING  (called once each, thread-safe)
+# MODEL LOADING  (DePlot only — called once, thread-safe)
 # ═════════════════════════════════════════════════════════════════════════════
 
-def _load_all_models() -> None:
-    """Load DePlot and Qwen2-VL singletons. No-op on subsequent calls."""
+def _load_deplot() -> None:
+    """Load DePlot singleton on demand. No-op on subsequent calls."""
     global _deplot_processor, _deplot_model
-    global _qwen_processor, _qwen_model
     global _device
 
     with _load_lock:
-        if _deplot_model is not None and _qwen_model is not None:
+        if _deplot_model is not None:
             return   # already loaded
 
         try:
             import torch
-            from transformers import (
-                AutoProcessor,
-                AutoModelForVision2Seq,
-                Pix2StructForConditionalGeneration,
-            )
+            from transformers import AutoProcessor, Pix2StructForConditionalGeneration
         except ImportError as exc:
             raise RuntimeError(
                 "Required packages missing. Run:\n"
@@ -113,138 +115,101 @@ def _load_all_models() -> None:
             ) from exc
 
         _device = "cuda" if torch.cuda.is_available() else "cpu"
-        dtype   = torch.float16 if _device == "cuda" else torch.float32
 
-        # ── Load DePlot ───────────────────────────────────────────────────────
-        # DePlot's processor always outputs float32 tensors regardless of device.
-        # Loading the model in float16 causes a dtype mismatch on generate():
-        #   RuntimeError: expected mat1 and mat2 to have the same dtype, got float != c10::Half
-        # Fix: always load DePlot in float32 so model and inputs share the same dtype.
-        if _deplot_model is None:
-            logger.info("Loading DePlot: %s  (device=%s, dtype=float32) …", _DEPLOT_MODEL_ID, _device)
-            try:
-                _deplot_processor = AutoProcessor.from_pretrained(_DEPLOT_MODEL_ID)
-                _deplot_model = Pix2StructForConditionalGeneration.from_pretrained(
-                    _DEPLOT_MODEL_ID,
-                    torch_dtype=torch.float32,   # must match processor output dtype
-                )
-                _deplot_model.to(_device)
-                _deplot_model.eval()
-                logger.info(
-                    "DePlot loaded ✓  (device=%s, dtype=%s)",
-                    _device, _deplot_model.dtype,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "DePlot failed to load — charts will fall back to Qwen2-VL. Error: %s", exc
-                )
-                _deplot_processor = None
-                _deplot_model     = None
-
-        # ── Load Qwen2-VL ─────────────────────────────────────────────────────
-        if _qwen_model is None:
-            logger.info("Loading Qwen2-VL: %s  (device=%s) …", _QWEN_MODEL_ID, _device)
-            try:
-                _qwen_processor = AutoProcessor.from_pretrained(
-                    _QWEN_MODEL_ID,
-                    trust_remote_code=True,
-                )
-                _qwen_model = AutoModelForVision2Seq.from_pretrained(
-                    _QWEN_MODEL_ID,
-                    torch_dtype=dtype,
-                    device_map="auto",
-                )
-                _qwen_model.eval()
-                logger.info("Qwen2-VL loaded ✓  (device_map=auto)")
-            except Exception as exc:
-                logger.warning(
-                    "Qwen2-VL failed to load — diagrams will skip vision. Error: %s", exc
-                )
-                _qwen_processor = None
-                _qwen_model     = None
+        # DePlot's processor outputs float32 tensors regardless of device.
+        # Always load in float32 to avoid dtype mismatch on generate().
+        logger.info("Loading DePlot: %s  (device=%s, dtype=float32) …", _DEPLOT_MODEL_ID, _device)
+        try:
+            _deplot_processor = AutoProcessor.from_pretrained(_DEPLOT_MODEL_ID)
+            _deplot_model = Pix2StructForConditionalGeneration.from_pretrained(
+                _DEPLOT_MODEL_ID,
+                torch_dtype=torch.float32,   # must match processor output dtype
+            )
+            _deplot_model.to(_device)
+            _deplot_model.eval()
+            logger.info(
+                "DePlot loaded ✓  (device=%s, dtype=%s)",
+                _device, _deplot_model.dtype,
+            )
+        except Exception as exc:
+            logger.warning(
+                "DePlot failed to load — graphs will fall back to caption-only. Error: %s", exc
+            )
+            _deplot_processor = None
+            _deplot_model     = None
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# FIGURE TYPE CLASSIFICATION
+# FIGURE TYPE CLASSIFICATION  (caption keyword + pixel heuristic)
 # ═════════════════════════════════════════════════════════════════════════════
 
-def classify_figure(image_bytes: bytes, caption: str = "") -> str:
+def classify_figure(caption: str = "", image_bytes: Optional[bytes] = None) -> str:
     """Classify a figure as either 'graph' or 'diagram'.
 
     Parameters
     ----------
-    image_bytes : Raw PNG bytes of the figure.
     caption     : Caption text extracted from the PDF (may be empty).
+    image_bytes : Raw PNG bytes of the figure (optional; used for pixel heuristic).
 
     Returns
     -------
     'graph'   — axis-bearing chart/plot; route to DePlot.
     'diagram' — circuit drawing, package outline, block diagram, table image;
-                route to Qwen2-VL.
+                caption-only description.
     """
-    # 1. Caption keyword check (fast, no image decoding).
-    #    Only fire on phrases that are unambiguously graph-related;
-    #    generic keywords like 'output' or 'resistance' are intentionally
-    #    excluded to avoid routing table images to DePlot.
+    # 1. Caption keyword check (fast path — no image decoding).
     cap_lower = caption.lower()
     if any(kw in cap_lower for kw in _GRAPH_CAPTION_KEYWORDS):
         logger.debug("classify_figure → graph  (caption keyword match: %r)", caption[:60])
         return "graph"
 
-    # 2. Pixel heuristic — detect axis-like long continuous lines.
-    #    Tables also have borders, so thresholds are deliberately conservative:
-    #      • ≥ 5 rows spanning > 60% of width  (table would have 2-3 borders max)
-    #      • ≥ 4 cols spanning > 60% of height
-    try:
-        from PIL import Image
-        import numpy as np
+    # 2. Pixel heuristic (only if image bytes provided).
+    if image_bytes:
+        try:
+            from PIL import Image
+            import numpy as np
 
-        img = Image.open(BytesIO(image_bytes)).convert("L")   # grayscale
+            img = Image.open(BytesIO(image_bytes)).convert("L")   # grayscale
 
-        # Resize to a manageable width for speed
-        max_w = 400
-        if img.width > max_w:
-            scale = max_w / img.width
-            img   = img.resize((max_w, int(img.height * scale)), Image.LANCZOS)
+            max_w = 400
+            if img.width > max_w:
+                scale = max_w / img.width
+                img   = img.resize((max_w, int(img.height * scale)), Image.LANCZOS)
 
-        arr  = np.array(img, dtype=np.float32)
-        dark = (arr < 128).astype(np.uint8)   # dark pixels = potential ink
-        h, w = dark.shape
+            arr  = np.array(img, dtype=np.float32)
+            dark = (arr < 128).astype(np.uint8)
+            h, w = dark.shape
 
-        row_sum = dark.sum(axis=1)   # horizontal line detector
-        col_sum = dark.sum(axis=0)   # vertical line detector
+            row_sum = dark.sum(axis=1)
+            col_sum = dark.sum(axis=0)
 
-        # Conservative thresholds: tables rarely have > 4 full-width border rows
-        long_h_lines = int((row_sum > 0.60 * w).sum())
-        long_v_lines = int((col_sum > 0.60 * h).sum())
+            long_h_lines = int((row_sum > 0.60 * w).sum())
+            long_v_lines = int((col_sum > 0.60 * h).sum())
 
-        if long_h_lines >= 5 or long_v_lines >= 4:
-            logger.debug(
-                "classify_figure → graph  (pixel heuristic: h_lines=%d, v_lines=%d)",
-                long_h_lines, long_v_lines,
-            )
-            return "graph"
+            if long_h_lines >= 5 or long_v_lines >= 4:
+                logger.debug(
+                    "classify_figure → graph  (pixel heuristic: h=%d v=%d)",
+                    long_h_lines, long_v_lines,
+                )
+                return "graph"
 
-        # 3. Edge-density heuristic: axis tick labels leave a dense dark strip
-        #    along the left and bottom edges of a graph image.
-        #    Threshold raised to 0.65 (sum of 4 edge strip means) to avoid
-        #    triggering on tables that have text in header / footer rows.
-        edge_rows  = max(1, h // 8)
-        edge_cols  = max(1, w // 8)
-        top_strip  = float(dark[:edge_rows, :].mean())
-        bot_strip  = float(dark[h - edge_rows:, :].mean())
-        left_strip = float(dark[:, :edge_cols].mean())
-        rgt_strip  = float(dark[:, w - edge_cols:].mean())
+            # Edge-density heuristic
+            edge_rows  = max(1, h // 8)
+            edge_cols  = max(1, w // 8)
+            top_strip  = float(dark[:edge_rows, :].mean())
+            bot_strip  = float(dark[h - edge_rows:, :].mean())
+            left_strip = float(dark[:, :edge_cols].mean())
+            rgt_strip  = float(dark[:, w - edge_cols:].mean())
 
-        edge_density = top_strip + bot_strip + left_strip + rgt_strip
-        if edge_density > 0.65:
-            logger.debug(
-                "classify_figure → graph  (edge-density heuristic: %.3f)", edge_density
-            )
-            return "graph"
+            edge_density = top_strip + bot_strip + left_strip + rgt_strip
+            if edge_density > 0.65:
+                logger.debug(
+                    "classify_figure → graph  (edge-density: %.3f)", edge_density
+                )
+                return "graph"
 
-    except Exception as exc:
-        logger.debug("Pixel-heuristic failed (continuing): %s", exc)
+        except Exception as exc:
+            logger.debug("Pixel-heuristic failed (continuing): %s", exc)
 
     logger.debug("classify_figure → diagram  (no graph features detected)")
     return "diagram"
@@ -259,6 +224,11 @@ _DEPLOT_PROMPT = "Generate the underlying data table of the figure below:"
 def _run_deplot(image_bytes: bytes) -> Optional[str]:
     """Send image to DePlot and return linearised chart data as text.
 
+    Optimisations vs previous version:
+      • Images resized to 512 × 512 before inference (saves GPU memory)
+      • torch.cuda.empty_cache() called before each run
+      • DePlot loaded in float32 to avoid dtype mismatch
+
     DePlot output is already structured (e.g. 'TITLE | x1 | x2 / y1 | v1 | v2'),
     which we reformat into a human-readable block for chunking.
     """
@@ -269,18 +239,16 @@ def _run_deplot(image_bytes: bytes) -> Optional[str]:
         import torch
         from PIL import Image
 
+        # ── GPU memory cleanup before inference ───────────────────────────────
+        if _device == "cuda":
+            torch.cuda.empty_cache()
+
         img = Image.open(BytesIO(image_bytes)).convert("RGB")
 
-        # Resize: DePlot works well up to 1024px on the long side
-        max_px = 1024
-        ratio  = min(max_px / max(img.width, img.height), 1.0)
-        if ratio < 1.0:
-            img = img.resize(
-                (int(img.width * ratio), int(img.height * ratio)),
-                Image.LANCZOS,
-            )
+        # ── Resize to 512×512 to reduce GPU memory pressure ───────────────────
+        img = img.resize((512, 512), Image.LANCZOS)
 
-        logger.info("Running DePlot inference …")
+        logger.info("Running DePlot inference on %dx%d image …", *img.size)
 
         # Step 1: encode
         inputs = _deplot_processor(
@@ -289,14 +257,10 @@ def _run_deplot(image_bytes: bytes) -> Optional[str]:
             return_tensors="pt",
         )
 
-        # Step 2: move to correct device
+        # Step 2: move to device
         inputs = {k: v.to(_deplot_model.device) for k, v in inputs.items()}
 
-        # Step 3: cast every floating-point tensor to the model's dtype.
-        # This is the belt-and-suspenders guard against the:
-        #   RuntimeError: expected mat1 and mat2 to have the same dtype,
-        #   but got: float != c10::Half
-        # error that occurs when model dtype ≠ processor output dtype.
+        # Step 3: cast floats to model dtype (belt-and-suspenders)
         model_dtype = _deplot_model.dtype
         inputs = {
             k: v.to(dtype=model_dtype) if (hasattr(v, "dtype") and v.is_floating_point()) else v
@@ -313,13 +277,21 @@ def _run_deplot(image_bytes: bytes) -> Optional[str]:
             generated_ids, skip_special_tokens=True
         )[0].strip()
 
-        logger.info("DePlot extracted chart data successfully")
+        # ── GPU cleanup after inference ────────────────────────────────────────
+        if _device == "cuda":
+            torch.cuda.empty_cache()
 
-        # Reformat DePlot's pipe-separated output into a readable structure.
+        logger.info("DePlot extracted chart data successfully")
         return _format_deplot_output(raw)
 
     except Exception as exc:
         logger.error("DePlot inference failed: %s", exc, exc_info=True)
+        if _device == "cuda":
+            try:
+                import torch
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
         return None
 
 
@@ -341,7 +313,6 @@ def _format_deplot_output(raw: str) -> str:
     lines = [raw]   # default: keep raw if parsing fails
 
     try:
-        # Split rows on  ' / '  (DePlot separator)
         rows = [r.strip() for r in raw.split(" / ") if r.strip()]
         if len(rows) >= 2:
             header_cols = [c.strip() for c in rows[0].split(" | ")]
@@ -376,7 +347,6 @@ def _format_deplot_output(raw: str) -> str:
 
 def _infer_trend(data_rows: list[str]) -> str:
     """Very lightweight trend inference from DePlot row strings."""
-    # Try to extract numeric values from each row cell
     try:
         values = []
         for row in data_rows:
@@ -400,85 +370,21 @@ def _infer_trend(data_rows: list[str]) -> str:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# QWEN2-VL PROCESSING
-# ═════════════════════════════════════════════════════════════════════════════
-
-_QWEN_DIAGRAM_PROMPT = (
-    "This image is from an electronics datasheet. "
-    "Describe the diagram, labels, connections, and technical meaning in detail."
-)
-
-def _run_qwen2vl(image_bytes: bytes) -> Optional[str]:
-    """Send image to Qwen2-VL and return a detailed text description."""
-    if _qwen_model is None or _qwen_processor is None:
-        return None
-
-    try:
-        import torch
-        from PIL import Image
-
-        img = Image.open(BytesIO(image_bytes)).convert("RGB")
-
-        # Resize to avoid OOM on smaller GPUs (cap at 1024px long side, 2× zoom)
-        max_px = 1024
-        ratio  = min(max_px / max(img.width, img.height), 1.0)
-        if ratio < 1.0:
-            img = img.resize(
-                (int(img.width * ratio), int(img.height * ratio)),
-                Image.LANCZOS,
-            )
-
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image", "image": img},
-                    {"type": "text",  "text":  _QWEN_DIAGRAM_PROMPT},
-                ],
-            }
-        ]
-
-        text   = _qwen_processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-        inputs = _qwen_processor(
-            text=[text],
-            images=[img],
-            padding=True,
-            return_tensors="pt",
-        ).to(_device)
-
-        with torch.no_grad():
-            generated_ids = _qwen_model.generate(
-                **inputs,
-                max_new_tokens=300,
-                do_sample=False,
-            )
-
-        trimmed = [
-            out[len(inp):]
-            for inp, out in zip(inputs.input_ids, generated_ids)
-        ]
-        result = _qwen_processor.batch_decode(
-            trimmed,
-            skip_special_tokens=True,
-            clean_up_tokenization_spaces=False,
-        )
-        return result[0].strip() if result else None
-
-    except Exception as exc:
-        logger.error("Qwen2-VL inference failed: %s", exc, exc_info=True)
-        return None
-
-
-# ═════════════════════════════════════════════════════════════════════════════
 # PUBLIC INTERFACE — FigureAnalyzer
 # ═════════════════════════════════════════════════════════════════════════════
 
 class FigureAnalyzer:
-    """Unified figure analysis with automatic chart/diagram routing.
+    """Figure analysis with caption-based classifier and DePlot for graphs.
 
-    Usage (replaces VisionProcessor in datasheet_chunker.py):
+    Routing:
+      • Graph  → DePlot linearises the chart into structured axis/data text.
+      • Diagram → Caption text only (no vision model required).
+
+    Qwen2-VL-2B has been removed entirely. Diagram descriptions are now
+    generated from the caption alone; Qwen3.5-4B in the RAG layer handles
+    any further reasoning when users ask about diagrams.
+
+    Usage (same API as before — callers need no changes):
 
         analyzer = FigureAnalyzer()
         description = analyzer.extract_and_describe(
@@ -490,11 +396,11 @@ class FigureAnalyzer:
 
     def __init__(self) -> None:
         try:
-            _load_all_models()
+            _load_deplot()
         except Exception as exc:
             logger.warning(
-                "FigureAnalyzer: one or more vision models failed to load — "
-                "affected figure types will use caption-only mode. Error: %s", exc,
+                "FigureAnalyzer: DePlot failed to load — "
+                "all figures will use caption-only mode. Error: %s", exc,
             )
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -519,7 +425,7 @@ class FigureAnalyzer:
         -------
         Structured string ready for embedding.
         """
-        figure_type = classify_figure(image_bytes, caption)
+        figure_type = classify_figure(caption=caption, image_bytes=image_bytes)
         logger.info(
             "FigureAnalyzer: page=%s  type=%s  part=%s  caption=%r",
             page, figure_type, part_number, caption[:60],
@@ -531,11 +437,10 @@ class FigureAnalyzer:
             vision_text = _run_deplot(image_bytes)
             if vision_text is None:
                 logger.warning(
-                    "DePlot returned None for graph on page %s — falling back to Qwen2-VL", page
+                    "DePlot returned None for graph on page %s — using caption-only fallback", page
                 )
-                vision_text = _run_qwen2vl(image_bytes)
-        else:
-            vision_text = _run_qwen2vl(image_bytes)
+                # No Qwen2-VL fallback: remain caption-only
+        # diagrams: caption-only — no vision model called
 
         return self._build_chunk_text(
             figure_type=figure_type,
@@ -620,8 +525,7 @@ class FigureAnalyzer:
         type_label = {
             "graph":   "Graph",
             "diagram": "Diagram",
-            # backward-compat alias in case old callers pass 'chart'
-            "chart":   "Graph",
+            "chart":   "Graph",   # backward-compat alias
         }.get(figure_type, "Figure")
 
         header_lines = [
@@ -635,9 +539,10 @@ class FigureAnalyzer:
         header = "\n".join(l for l in header_lines if l)
 
         if vision_text:
-            body_label = "Extracted Data / Analysis:" if figure_type == "chart" else "Description:"
-            return f"{header}\n\n{body_label}\n{vision_text}"
+            return f"{header}\n\n{vision_text}"
         elif caption:
-            return f"{header}\n\nNo vision analysis available. Caption: {caption}"
+            # Caption-only: repeat caption as Description so the embedding
+            # captures both the structured header and the natural-language text.
+            return f"{header}\n\nDescription: {caption}"
         else:
             return f"{header}\n\nFigure with no caption or vision analysis."

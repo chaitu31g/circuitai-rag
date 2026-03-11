@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from ingestion.vision.figure_analyzer import FigureAnalyzer
+from ingestion.vision.figure_analyzer import FigureAnalyzer, classify_figure
 
 logger = logging.getLogger(__name__)
 
@@ -199,12 +199,25 @@ def chunk_figure(
 ) -> Optional[Chunk]:
     """Classify and analyze a figure from a parsed Docling document.
 
-    Routes to DePlot (charts/graphs) or Qwen2-VL (diagrams) via FigureAnalyzer.
-    Returns a Chunk whose text contains structured axis/trend/description data.
+    Routing (Qwen2-VL removed):
+      • Graph   → DePlot extracts structured axis/data text.
+      • Diagram → Caption-only; Qwen3.5-4B reasons at query time.
+
+    Returns a Chunk with structured metadata matching the target schema:
+    {
+      "type": "figure",
+      "figure_type": "graph" | "diagram",
+      "component": <part_number>,
+      "page": <int>,
+      "title": <chart title extracted by DePlot or caption>,
+      "x_axis": <x-axis label>,
+      "y_axis": <y-axis label>,
+      "text": <full chunk text for embedding>,
+    }
 
     Parameters
     ----------
-    figure_index : Global sequential index of this figure within the document.
+    figure_index : Global sequential index within the document.
                   Embedded into fallback chunk text to guarantee uniqueness
                   even when a figure has no caption and no bbox.
     """
@@ -219,9 +232,8 @@ def chunk_figure(
     page = (figure.get("prov") or [{}])[0].get("page_no") if figure.get("prov") else None
     bbox = (figure.get("prov") or [{}])[0].get("bbox") if figure.get("prov") else None
 
-    # Run the dual-model vision pipeline
+    # ── Run vision pipeline (DePlot for graphs, caption-only for diagrams) ────
     vision_text = None
-    figure_type = "unknown"  # determined below
     if page and bbox:
         logger.info(
             "FigureAnalyzer: dispatching figure %d page=%s for %s  caption=%r",
@@ -235,7 +247,7 @@ def chunk_figure(
             part_number=part_number,
         )
 
-    # ── Determine figure_type from vision text header ──────────────────────────
+    # ── Determine figure_type from FigureAnalyzer output header ───────────────
     # FigureAnalyzer always prefixes output with "Figure Type: Graph" / "Diagram".
     if vision_text:
         first_line = (vision_text.splitlines() or [""])[0].lower()
@@ -246,20 +258,24 @@ def chunk_figure(
         else:
             figure_type = "unknown"
     else:
-        # Caption-based fallback when vision analysis failed.
-        # Uses tighter phrases (not single words) to avoid tagging table images as graphs.
-        _graph_kw = {
-            "graph", "curve", "plot", "versus", "vs.",
-            "power derating", "gate charge", "output characteristic",
-            "transfer characteristic", "safe operating", "soa",
-            "switching waveform", "frequency response",
-            "drain current vs", "power dissipation vs",
-        }
-        figure_type = "graph" if any(kw in cap_text.lower() for kw in _graph_kw) else "diagram"
+        # Caption-based fallback using the shared keyword classifier.
+        figure_type = classify_figure(caption=cap_text)
 
-    # ── Build chunk text ───────────────────────────────────────────────────────
-    # FigureAnalyzer returns structured text; use it directly if available.
-    # Fallback paths embed figure_index to guarantee unique text per figure.
+    # ── Extract chart title, axes from DePlot vision text ────────────────────
+    title  = cap_text or ""
+    x_axis = ""
+    y_axis = ""
+    if vision_text:
+        for line in vision_text.splitlines():
+            ll = line.lower().strip()
+            if ll.startswith("chart title:"):
+                title = line.split(":", 1)[-1].strip() or title
+            elif ll.startswith("x-axis:") or ll.startswith("x axis:"):
+                x_axis = line.split(":", 1)[-1].strip()
+            elif ll.startswith("y-axis:") or ll.startswith("y axis:"):
+                y_axis = line.split(":", 1)[-1].strip()
+
+    # ── Build chunk text ──────────────────────────────────────────────────────
     if vision_text:
         text = vision_text
     elif cap_text:
@@ -270,11 +286,9 @@ def chunk_figure(
             f"Component: {part_number}\n"
             f"Page: {page}\n"
             f"Figure Index: {figure_index}\n\n"
-            f"No vision analysis available."
+            f"Description: {cap_text}"
         )
     else:
-        # Include figure_index so that bare figures (no caption, no bbox) never
-        # collide with each other in the seen_texts dedup set.
         bbox_str = f"{bbox.get('l', 0):.1f}_{bbox.get('t', 0):.1f}" if bbox else "unknown"
         type_label = "Graph" if figure_type == "graph" else "Diagram"
         text = (
@@ -285,32 +299,28 @@ def chunk_figure(
             f"Ref: {bbox_str}"
         )
 
-    # ── Extract axes from vision text when available ───────────────────────────
-    x_axis = ""
-    y_axis = ""
-    if vision_text:
-        for line in vision_text.splitlines():
-            ll = line.lower().strip()
-            if ll.startswith("x-axis:") or ll.startswith("x axis:"):
-                x_axis = line.split(":", 1)[-1].strip()
-            elif ll.startswith("y-axis:") or ll.startswith("y axis:"):
-                y_axis = line.split(":", 1)[-1].strip()
-
     return Chunk(
         text=text,
         chunk_type="figure",
         metadata={
+            # Standard type markers (both fields for backward compat)
             "type":          "figure",
             "chunk_type":    "figure",
+            # Figure classification
             "figure_type":   figure_type,
             "figure_index":  figure_index,
+            # Component provenance
             "part_number":   part_number,
+            "component":     part_number,
             "section_name":  "figures_and_diagrams",
             "page":          page,
-            "has_vision":    vision_text is not None,
+            # Content fields — improves embedding quality & retrieval accuracy
+            "title":         title,
             "caption":       cap_text or "",
+            "text":          cap_text or "",
             "x_axis":        x_axis,
             "y_axis":        y_axis,
+            "has_vision":    vision_text is not None,
         },
     )
 

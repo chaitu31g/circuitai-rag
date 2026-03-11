@@ -25,11 +25,11 @@ class Settings(BaseSettings):
     chroma_server_nofile: int = 4096
 
     # HuggingFace LLM — change HF_MODEL env var in Colab to switch models
-    # Examples:
-    #   Qwen/Qwen2.5-3B-Instruct   (fast, fits T4 easily)
-    #   mistralai/Mistral-7B-Instruct-v0.2  (slower, higher quality)
-    #   google/gemma-2b-it           (small & fast)
-    hf_model: str = "Qwen/Qwen2.5-3B-Instruct"
+    # Primary: Qwen/Qwen3.5-4B  — strongest reasoning for datasheet Q&A on T4
+    # Alternatives:
+    #   Qwen/Qwen2.5-3B-Instruct   (faster, slightly lower quality)
+    #   mistralai/Mistral-7B-Instruct-v0.2  (slower, also good)
+    hf_model: str = "Qwen/Qwen3.5-4B"
 
     # Embedding & reranker
     embedding_model: str = "BAAI/bge-m3"
