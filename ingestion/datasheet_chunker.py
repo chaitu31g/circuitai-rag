@@ -135,7 +135,20 @@ def _split_prose(text: str, max_len: int = MAX_PROSE_CHARS) -> list[str]:
 # Table chunking
 # ---------------------------------------------------------------------------
 
-def chunk_table(table: dict, section_name: str, part_number: str) -> Optional[Chunk]:
+def chunk_table(
+    table: dict,
+    section_name: str,
+    part_number: str,
+    table_number: int = 0,
+) -> Optional[Chunk]:
+    """Convert a parsed Docling table into a semantically rich chunk.
+
+    The output text has two parts:
+    1. A natural-language preamble that names the table, section, and all
+       parameter names — this is what the embedding model uses to match queries.
+    2. The structured data rows in 'Parameter: Value' form so the LLM can
+       read exact values without having to decode raw col=val strings.
+    """
     cells = table.get("data", {}).get("table_cells", [])
     if not cells:
         return None
@@ -158,7 +171,8 @@ def chunk_table(table: dict, section_name: str, part_number: str) -> Optional[Ch
     headers  = sorted_rows[0]
     num_cols = len(headers)
 
-    lines = []
+    # Build structured data rows in readable form
+    data_lines = []
     for row in sorted_rows[1:]:
         while len(row) < num_cols:
             row.append("")
@@ -169,27 +183,44 @@ def chunk_table(table: dict, section_name: str, part_number: str) -> Optional[Ch
             if not val or val == "-":
                 continue
             hdr = headers[i] if i < len(headers) and headers[i] else f"col{i}"
-            parts.append(f"{hdr}={val}")
+            parts.append(f"{hdr}: {val}")
         if parts:
-            lines.append(", ".join(parts))
+            data_lines.append("  " + " | ".join(parts))
 
-    if not lines:
+    if not data_lines:
         return None
 
-    header_text = " | ".join(h for h in headers if h)
-    text = (
-        f"{section_name} table for {part_number} [{header_text}]:\n"
-        + "\n".join(lines)
+    # Build semantic preamble — makes embedding match queries about this section
+    non_empty_headers = [h for h in headers if h]
+    param_names = ", ".join(non_empty_headers[:6])  # first 6 column names
+    section_label = section_name.replace("_", " ").title()
+    table_label = f"Table {table_number}" if table_number else "Table"
+
+    preamble = (
+        f"{table_label}: {section_label} data for {part_number}.\n"
+        f"This table lists the following parameters/columns: {param_names}.\n"
+        f"It contains {len(data_lines)} row(s) of specification data.\n"
     )
+
+    header_row = " | ".join(h for h in headers if h)
+    text = (
+        preamble
+        + f"\nColumns: {header_row}\n"
+        + "\n".join(data_lines)
+    )
+
     page = (table.get("prov") or [{}])[0].get("page_no")
     return Chunk(
         text=text,
         chunk_type="table",
         metadata={
-            "part_number":  part_number,
-            "section_name": section_name,
-            "page":         page,
-            "num_rows":     len(sorted_rows) - 1,
+            "part_number":   part_number,
+            "section_name":  section_name,
+            "table_number":  table_number,
+            "table_title":   f"{section_label} — {param_names[:60]}",
+            "page":          page,
+            "num_rows":      len(sorted_rows) - 1,
+            "num_cols":      num_cols,
         },
     )
 
@@ -493,7 +524,7 @@ def chunk_document(
         for chunk in chunk_section(sec_name, sec_texts, part_number, priority):
             _add(chunk)
 
-    # Tables — assign to nearest section by page
+    # Tables — assign to nearest section by page, with sequential table number
     for i, tbl in enumerate(tables):
         page     = (tbl.get("prov") or [{}])[0].get("page_no")
         best_sec = "electrical_characteristics"
@@ -504,7 +535,7 @@ def chunk_document(
                 if d and d not in _SKIP_TYPES:
                     best_sec = d
                     break
-        _add(chunk_table(tbl, best_sec, part_number))
+        _add(chunk_table(tbl, best_sec, part_number, table_number=i + 1))
 
     # Figures — try to find nearby captions if missing
     for fig in pictures:
