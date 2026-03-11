@@ -36,7 +36,8 @@ _load_lock = threading.Lock()
 # System prompt injected via the chat template for every query.
 _SYSTEM_PROMPT = (
     "You are an expert electronics engineer answering questions based solely on the provided datasheet context. "
-    "Provide your answer immediately and directly. "
+    "Provide detailed, thorough technical answers. Explain each point clearly. "
+    "Use bullet points (- item) when listing multiple features, specs, or characteristics. "
     "Never invent, estimate, or infer values not present in the context. "
     "If the answer cannot be found in the provided context, say so clearly. "
     "CRITICAL INSTRUCTION: DO NOT output any thinking process, step-by-step analysis, rationale, or drafts. Output EXACTLY AND ONLY the final direct answer."
@@ -107,20 +108,23 @@ def load_model_once(model_id: str = MODEL_NAME) -> None:
 
 
 def build_prompt(context: str, query: str) -> list[dict]:
-    """Build the chat messages list for a strict answer-only RAG query.
+    """Build the chat messages list for a detailed RAG query.
 
     Returns a list of message dicts ({'role': ..., 'content': ...}) which are
     passed to the tokenizer's apply_chat_template(). This approach works
     correctly for Qwen3.5 and any other instruction-tuned model without
     manual prompt format management.
 
-    The prompt is structured to produce a concise final answer with no
-    chain-of-thought reasoning or step-by-step analysis output.
+    The prompt is structured to produce a detailed technical answer with
+    bullet points where applicable — no chain-of-thought or reasoning steps.
     """
     user_content = (
         "You are an expert electronics engineer.\n\n"
-        "Provide a concise, direct technical explanation (2-4 sentences) answering the user's question. "
-        "Base your entire answer strictly on the datasheet context below.\n\n"
+        "Answer the user's question in detail, taking all key points from the datasheet context below and explaining each one clearly.\n"
+        "Format your answer as follows:\n"
+        "- If the answer involves multiple features, properties, or characteristics, list each as a bullet point (- item) and briefly explain what it means technically.\n"
+        "- If the answer is a single value or fact, state it directly with a short explanation.\n"
+        "- Base your entire answer strictly on the datasheet context below — do not invent or generalize.\n\n"
         "IMPORTANT: DO NOT include any chain-of-thought, 'Thinking Process', step-by-step analysis, or drafts in your response. "
         "Output ONLY the final answer.\n\n"
         f"Datasheet Context:\n{context}\n\n"
@@ -145,7 +149,8 @@ def build_synthesis_prompt(section_context: str, query: str) -> list[dict]:
     system = (
         "You are an expert electronics engineer analyzing a semiconductor datasheet. "
         "You will receive section-level summaries covering different aspects of the component. "
-        "Your task is to synthesize the information ACROSS all sections to provide a direct, concise answer. "
+        "Your task is to synthesize the information ACROSS all sections and provide a detailed, thorough answer. "
+        "Use bullet points (- item) when listing features, specs, or characteristics, and explain each point clearly. "
         "Preserve all numeric values, units, and conditions accurately. "
         "If a value is absent from all sections, say so clearly. "
         "CRITICAL INSTRUCTION: DO NOT output any thinking process, step-by-step analysis, rationale, or drafts. Output EXACTLY AND ONLY the final direct answer."
@@ -153,8 +158,10 @@ def build_synthesis_prompt(section_context: str, query: str) -> list[dict]:
     user_content = (
         "Below are section-level summaries of a semiconductor datasheet.\n"
         "Each section covers a different aspect of the component.\n\n"
-        "Synthesize the relevant information from these sections into a complete, direct answer. "
-        "Cite specific values, units, and conditions from the summaries.\n\n"
+        "Synthesize the relevant information from these sections into a detailed, well-explained answer.\n"
+        "- List each key feature or characteristic as a bullet point.\n"
+        "- Explain what each feature means technically (do not just name it).\n"
+        "- Cite specific values, units, and conditions from the summaries.\n\n"
         "IMPORTANT: DO NOT output any reasoning steps, 'Thinking Process', or drafts. Output ONLY the final analytical answer.\n\n"
         f"Datasheet Section Summaries:\n{section_context}\n\n"
         f"Question:\n{query}"
@@ -245,7 +252,7 @@ def _filter_reasoning_steps(text: str) -> str:
 def generate_response(
     prompt: list[dict] | str,
     model_id: str = MODEL_NAME,
-    max_new_tokens: int = 300,
+    max_new_tokens: int = 600,
     temperature: float = 0.4,
     top_p: float = 0.9,
     do_sample: bool = True,
@@ -261,7 +268,7 @@ def generate_response(
     model_id:
         HuggingFace model repo ID. Used only if model isn't loaded yet.
     max_new_tokens:
-        Max tokens to generate. 300 is sufficient for synthesized answers.
+        Max tokens to generate. 600 gives room for detailed bullet-point answers.
     temperature:
         Sampling temperature. 0.4 balances creativity and faithfulness,
         encouraging synthesis rather than verbatim chunk copying.
@@ -310,7 +317,7 @@ def generate_response(
 def stream_response(
     prompt: list[dict] | str,
     model_id: str = MODEL_NAME,
-    max_new_tokens: int = 300,
+    max_new_tokens: int = 600,
     temperature: float = 0.4,
     top_p: float = 0.9,
     do_sample: bool = True,
