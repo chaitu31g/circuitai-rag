@@ -8,6 +8,8 @@ from typing import List, Optional
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are an electronics engineer answering from datasheet context. "
+    "If the context includes figure descriptions or diagram summaries that are "
+    "not relevant to the question, ignore them completely. "
     "If the answer is not present in the provided context, respond with: "
     "'The datasheet context does not specify this value.' "
     "Do not provide estimated or general electronics knowledge."
@@ -21,7 +23,9 @@ SPEC_EXTRACTION_SYSTEM_PROMPT = (
     "3. If a constraint exists (min/max), state it explicitly.\n"
     "4. Preserve units and conditions.\n"
     "5. Do NOT infer or estimate missing values.\n"
-    "6. If no value exists, say: 'The datasheet context does not specify this value.'"
+    "6. If the context contains figure descriptions or diagram summaries that are not relevant "
+    "to the question, ignore them — extract only from textual specification content.\n"
+    "7. If no value exists, say: 'The datasheet context does not specify this value.'"
 )
 
 JSON_SPEC_SYSTEM_PROMPT = (
@@ -33,8 +37,9 @@ JSON_SPEC_SYSTEM_PROMPT = (
     "2. Preserve parameter name (ICBO, VCBO, VBRCBO, etc.).\n"
     "3. Include value, unit, and conditions.\n"
     "4. Do NOT infer missing values.\n"
-    "5. If no constraint exists, return an empty JSON array.\n"
-    "6. Output ONLY JSON (no explanations)."
+    "5. If the context includes figure descriptions or diagram summaries that are not relevant, ignore them.\n"
+    "6. If no constraint exists, return an empty JSON array.\n"
+    "7. Output ONLY JSON (no explanations)."
 )
 
 RAG_ANSWER_SYSTEM_PROMPT = (
@@ -45,7 +50,9 @@ RAG_ANSWER_SYSTEM_PROMPT = (
     "3. If multiple constraints exist, summarize them clearly.\n"
     "4. Preserve units and conditions.\n"
     "5. Do NOT say the value is unspecified if constraints are present.\n"
-    "6. Do NOT invent values.\n\n"
+    "6. Do NOT invent values.\n"
+    "7. If the context contains figure descriptions or diagram summaries that are "
+    "not relevant to the question, ignore them — base your answer on the textual content only.\n\n"
     "Answer style:\n"
     "Concise technical datasheet explanation using retrieved values."
 )
@@ -82,6 +89,8 @@ class DatasheetPromptBuilder:
             "Use only the provided datasheet context.\n"
             "Rules:\n"
             "- Do not invent specifications, values, or conditions.\n"
+            "- If figure descriptions or diagram summaries in the context are not "
+            "relevant to the question, ignore them.\n"
             "- If missing from context, reply exactly: "
             "'The datasheet context does not specify this value.'\n"
             "- Cite the relevant context details in your reasoning.\n"
@@ -174,6 +183,7 @@ class DatasheetPromptBuilder:
             "Answer the question only from datasheet context.\n"
             "If constraints are present, report them directly with units and conditions.\n"
             "If multiple constraints are present, summarize each clearly in one concise explanation.\n"
+            "If the context contains figure descriptions or diagram summaries not relevant to the question, ignore them.\n"
             "Only say the value is not specified when no relevant constraint exists in context.\n\n"
             f"Question:\n{query}\n\n"
             f"Datasheet Context:\n{context}{refs_line}"

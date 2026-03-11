@@ -35,9 +35,17 @@ class Chunk:
 # ---------------------------------------------------------------------------
 
 MIN_CHUNK_LENGTH   = 10      # characters; below this a chunk is noise
+MIN_FIGURE_TEXT    = 20      # characters; below this a figure chunk is discarded
 MAX_PROSE_CHARS    = 900     # semantic-pass: max chars per structured chunk
 WINDOW_CHARS       = 700     # coverage-pass: characters per sliding window
 WINDOW_STEP_CHARS  = 500     # coverage-pass: step size (200 char overlap)
+
+# Patterns that indicate garbage OCR / DePlot output
+_FIGURE_GARBAGE_PATTERNS = [
+    "TITLE |",          # DePlot corrupted header
+    "Seats Bath",       # known OCR corruption
+    "electoral divisions",  # OCR gibberish
+]
 
 # Canonical section keyword map — order matters, first match wins
 _SECTION_MAP = [
@@ -298,6 +306,19 @@ def chunk_figure(
             f"Figure Index: {figure_index}\n"
             f"Ref: {bbox_str}"
         )
+
+    # ── Quality gate: discard low-quality / corrupted figure chunks ──────────
+    text_for_quality_check = text.strip()
+    is_low_quality = (
+        len(text_for_quality_check) < MIN_FIGURE_TEXT
+        or any(pat in text_for_quality_check for pat in _FIGURE_GARBAGE_PATTERNS)
+    )
+    if is_low_quality:
+        logger.warning(
+            "Skipping low-quality figure chunk (index=%d, part=%s, text_preview=%r)",
+            figure_index, part_number, text_for_quality_check[:80],
+        )
+        return None
 
     return Chunk(
         text=text,
