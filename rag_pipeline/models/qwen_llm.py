@@ -25,6 +25,101 @@ from typing import Generator
 
 logger = logging.getLogger(__name__)
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LaTeX → plain-text cleaner
+# ─────────────────────────────────────────────────────────────────────────────
+
+def clean_latex_symbols(text: str) -> str:
+    """Convert LaTeX math expressions in datasheet text to readable plain text.
+
+    Semiconductor datasheets (and the LLM output derived from them) often
+    contain LaTeX-style math notation such as ``$I_{D,pulse}$``.  Since the
+    API returns plain text and the UI does not render LaTeX, this function
+    converts such expressions into engineering-friendly notation before the
+    text is sent to the user.
+
+    Conversions performed
+    ---------------------
+    * ``$I_{D,pulse}$``  →  ``ID(pulse)``
+    * ``$R_{DS(on)}$``   →  ``RDS(on)``
+    * ``$T_j$``          →  ``Tj``   (single-char subscript without braces)
+    * ``$V^{2}$``        →  ``V^2``
+    * ``\\theta``        →  ``theta``
+    * ``\\mu``           →  ``µ``
+    * ``^\\circ``        →  ``°``
+    * ``\\Omega``        →  ``Ω``
+    * Removes standalone math delimiters ``$`` and ``\\(`` / ``\\)``.
+    """
+    import re
+
+    if not text:
+        return text
+
+    # ── 1. Remove inline LaTeX fences: \( ... \) and \[ ... \] ────────────
+    text = re.sub(r'\\\(', '', text)
+    text = re.sub(r'\\\)', '', text)
+    text = re.sub(r'\\\[', '', text)
+    text = re.sub(r'\\\]', '', text)
+
+    # ── 2. Remove bare $ delimiters (including $$) ─────────────────────────
+    text = text.replace('$$', '').replace('$', '')
+
+    # ── 3. Subscripts with braces: X_{abc} → X(abc) ───────────────────────
+    #    Handles multi-character subscripts like I_{D,pulse} → ID(pulse)
+    text = re.sub(r'([A-Za-z])_\{([^}]*)\}', r'\1(\2)', text)
+
+    # ── 4. Subscripts without braces: X_y → Xy (single char) ─────────────
+    text = re.sub(r'([A-Za-z])_([A-Za-z0-9])', r'\1\2', text)
+
+    # ── 5. Superscripts with braces: X^{abc} → X^abc ──────────────────────
+    text = re.sub(r'([A-Za-z0-9])\^\{([^}]*)\}', r'\1^\2', text)
+
+    # ── 6. Common engineering / Greek symbols ──────────────────────────────
+    replacements = [
+        (r'\\theta',   'theta'),
+        (r'\\Theta',   'Theta'),
+        (r'\\mu',      'µ'),
+        (r'\\Omega',   'Ω'),
+        (r'\\omega',   'ω'),
+        (r'\\alpha',   'alpha'),
+        (r'\\beta',    'beta'),
+        (r'\\delta',   'delta'),
+        (r'\\Delta',   'Delta'),
+        (r'\\epsilon', 'epsilon'),
+        (r'\\lambda',  'lambda'),
+        (r'\\pi',      'pi'),
+        (r'\\sigma',   'sigma'),
+        (r'\\tau',     'tau'),
+        (r'\^\\circ',  '°'),
+        (r'\\times',   '×'),
+        (r'\\cdot',    '·'),
+        (r'\\leq',     '≤'),
+        (r'\\geq',     '≥'),
+        (r'\\neq',     '≠'),
+        (r'\\approx',  '≈'),
+        (r'\\infty',   '∞'),
+        (r'\\pm',      '±'),
+        (r'\\sqrt',    'sqrt'),
+        (r'\\frac',    ''),        # remove \frac command; numerator/denominator remain
+        (r'\\text\{([^}]*)\}', r'\1'),  # \text{abc} → abc
+        (r'\\mathrm\{([^}]*)\}', r'\1'),
+        (r'\\mathbf\{([^}]*)\}', r'\1'),
+        (r'\\textbf\{([^}]*)\}', r'\1'),
+        (r'\\left\(',  '('),
+        (r'\\right\)', ')'),
+        (r'\\left\[',  '['),
+        (r'\\right\]', ']'),
+    ]
+    for pattern, repl in replacements:
+        text = re.sub(pattern, repl, text)
+
+    # ── 7. Strip any remaining lone backslash-word commands ───────────────
+    #    e.g. \rm, \bf, \it left over after the above passes
+    text = re.sub(r'\\[a-zA-Z]+', '', text)
+
+    return text
+
 # ── Model identifier ───────────────────────────────────────────────────────────
 MODEL_NAME = os.environ.get("HF_MODEL", "Qwen/Qwen3.5-4B")
 
@@ -118,6 +213,10 @@ def build_prompt(context: str, query: str) -> list[dict]:
     The prompt is structured to produce a detailed technical answer with
     bullet points where applicable — no chain-of-thought or reasoning steps.
     """
+    # Clean LaTeX from retrieved context before it enters the prompt so the
+    # model never sees raw math notation and is less likely to reproduce it.
+    context = clean_latex_symbols(context)
+
     user_content = (
         "You are an expert electronics engineer.\n\n"
         "Answer the user's question in detail, taking all key points from the datasheet context below and explaining each one clearly.\n"
@@ -155,6 +254,9 @@ def build_synthesis_prompt(section_context: str, query: str) -> list[dict]:
         "If a value is absent from all sections, say so clearly. "
         "CRITICAL INSTRUCTION: DO NOT output any thinking process, step-by-step analysis, rationale, or drafts. Output EXACTLY AND ONLY the final direct answer."
     )
+    # Clean LaTeX from section summaries before sending to the model.
+    section_context = clean_latex_symbols(section_context)
+
     user_content = (
         "Below are section-level summaries of a semiconductor datasheet.\n"
         "Each section covers a different aspect of the component.\n\n"
@@ -311,6 +413,7 @@ def generate_response(
     input_length = inputs["input_ids"].shape[1]
     new_tokens = output_ids[0][input_length:]
     raw = _tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+    raw = clean_latex_symbols(raw)
     return _filter_reasoning_steps(raw)
 
 
@@ -394,7 +497,8 @@ def stream_response(
 
     gen_thread.join()
 
-    full_text = _filter_reasoning_steps("".join(buffer))
+    full_text = clean_latex_symbols("".join(buffer))
+    full_text = _filter_reasoning_steps(full_text)
     # Yield the cleaned text as a single chunk (preserves the streaming interface).
     if full_text:
         yield full_text
