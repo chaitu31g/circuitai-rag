@@ -167,43 +167,50 @@ def build_synthesis_prompt(section_context: str, query: str) -> list[dict]:
 
 
 def _apply_template(messages: list[dict]) -> str:
-    """Convert chat messages → model-specific prompt string via the tokenizer."""
+    """Convert chat messages → model-specific prompt string via the tokenizer.
+
+    Passes ``enable_thinking=False`` so Qwen3-series models suppress their
+    built-in chain-of-thought / thinking mode and output the answer directly.
+    """
     if _tokenizer is None:
         raise RuntimeError("Model is not loaded yet.")
-    return _tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,   # adds the assistant turn opener
-    )
+    try:
+        # Qwen3 tokenizers support enable_thinking to disable <think> blocks.
+        return _tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,    # ← disables Qwen3 thinking/reasoning mode
+        )
+    except TypeError:
+        # Older tokenizer versions don't have enable_thinking — fall back gracefully.
+        return _tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
 
 
 def _filter_reasoning_steps(text: str) -> str:
-    """Remove chain-of-thought reasoning lines that Qwen3.5-4B may still emit.
+    """Remove chain-of-thought / thinking blocks from model output.
 
-    Strips lines whose heading matches common reasoning-step patterns such as:
-    "Analyze the Request", "Review the Chunks", "Step 1", "Thinking Process".
-    Only the heading line (and any immediately following indented sub-bullet
-    lines) is removed; the conclusive answer sentences are preserved.
+    Qwen3-series models may emit <think>...</think> XML blocks even when
+    prompted not to. This function strips them as a safety net, along with
+    other common reasoning-step heading patterns.
     """
     import re
 
-    # Remove the entire block starting with "Thinking Process" or "Analysis" until "Draft"
-    # or until the actual answer begins. Try a more aggressive match for the whole thinking block.
-    # Often, models will generate "Thinking Process:... Draft 1: <answer>"
-    # Let's try to strip everything before the final answer if it looks like a thinking process.
+    # ── Priority 1: strip Qwen3 <think>...</think> blocks ─────────────────────
+    # These are emitted by the model's internal reasoning mode.
+    text = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE).strip()
+
+    # ── Priority 2: legacy "Thinking Process" / "Draft N:" pattern ────────────
     if re.search(r"(?i)thinking process|analyze the request", text):
-        # Look for "Draft 1:", "Answer:", "Synthesize the Answer:", or "Final Answer:"
         match = re.search(r"(?im)(?:draft\s*\d+|final answer|answer):(.*)", text, re.DOTALL)
         if match:
-            # We found a clear delimiter for the final answer.
             text = match.group(1).strip()
-        else:
-            # If no clear delimiter, let's try to remove numbered lists and bullet points heavily
-            # up to the last paragraph. This is harder. For now, try our best to remove common headers.
-            pass
 
-    # Phase 1 – remove numbered / bulleted reasoning headers and their body.
-    # Matches lines like: "1. Analyze the Request", "**Step 2**", "## Analysis"
+    # ── Priority 3: remove numbered / bulleted reasoning headers ───────────────
     heading_re = re.compile(
         r"(?im)"
         r"^[ \t]*(?:[\*#\-]+[ \t]*)?"      # optional markdown prefix
@@ -222,13 +229,14 @@ def _filter_reasoning_steps(text: str) -> str:
         r"[^\n]*\n?"                         # rest of line
     )
     cleaned = heading_re.sub("", text)
-    
-    # Aggressively remove all lines that just list facts like "* Role: Expert Electronics Engineer."
-    # if they are part of a meta analysis block.
-    meta_re = re.compile(r"(?im)^[ \t]*\*[ \t]*(?:Role|Task|Constraint|Input Data|Look for):[^\n]*\n?", re.IGNORECASE)
+
+    # Remove meta-analysis bullet lines like "* Role: Expert Electronics Engineer."
+    meta_re = re.compile(
+        r"(?im)^[ \t]*\*[ \t]*(?:Role|Task|Constraint|Input Data|Look for):[^\n]*\n?"
+    )
     cleaned = meta_re.sub("", cleaned)
 
-    # Phase 2 – collapse multiple blank lines left by removal.
+    # Collapse multiple blank lines.
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
 
     return cleaned.strip()
@@ -369,8 +377,17 @@ def stream_response(
     )
     gen_thread.start()
 
+    # Buffer all tokens so we can strip <think>...</think> blocks before
+    # yielding. Streaming token-by-token with partial think blocks would
+    # expose the reasoning text to the client.
+    buffer = []
     for token in streamer:
         if token:
-            yield token
+            buffer.append(token)
 
     gen_thread.join()
+
+    full_text = _filter_reasoning_steps("".join(buffer))
+    # Yield the cleaned text as a single chunk (preserves the streaming interface).
+    if full_text:
+        yield full_text
