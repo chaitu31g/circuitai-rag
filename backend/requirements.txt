@@ -9,7 +9,7 @@ Requests==2.32.3
 # ── Vector database ───────────────────────────────────────────────────────────
 chromadb==0.5.21
 
-# ── Embedding model: BAAI/bge-m3 (1024-dim) ──────────────────────────────────
+# ── Embedding & Reranking models (bge-m3 / bge-reranker-large) ───────────────
 sentence-transformers>=2.7.0
 
 # ── PDF parsing ───────────────────────────────────────────────────────────────

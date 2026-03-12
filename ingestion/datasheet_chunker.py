@@ -535,7 +535,10 @@ def chunk_document(
                 if d and d not in _SKIP_TYPES:
                     best_sec = d
                     break
-        _add(chunk_table(tbl, best_sec, part_number, table_number=i + 1))
+        from rag_pipeline.utils.table_row_formatter import format_table_rows
+        row_chunks = format_table_rows(tbl, best_sec, part_number, i + 1)
+        for rc in row_chunks:
+            _add(rc)
 
     # Figures — try to find nearby captions if missing
     for fig in pictures:
@@ -633,8 +636,8 @@ def chunk_document(
     logger.info(
         "Chunked %s: %d total chunks — %d semantic, %d tables, %d figures, %d coverage windows",
         part_number, len(all_chunks),
-        sum(1 for c in all_chunks if c.chunk_type not in ("table", "figure", "raw_text")),
-        sum(1 for c in all_chunks if c.chunk_type == "table"),
+        sum(1 for c in all_chunks if c.chunk_type not in ("table", "table_row", "figure", "raw_text")),
+        sum(1 for c in all_chunks if c.chunk_type in ("table", "table_row")),
         sum(1 for c in all_chunks if c.chunk_type == "figure"),
         sum(1 for c in all_chunks if c.chunk_type == "raw_text"),
     )

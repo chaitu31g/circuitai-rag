@@ -428,9 +428,10 @@ class RAGPipeline:
         rerank_blend_alpha: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Run a full offline RAG pass and return answer + retrieval diagnostics."""
+        effective_top_k = (40 if not top_k else top_k) if use_reranker else (top_k or self.config.top_k)
         retrieved_docs = self.retriever.retrieve(
             query=query,
-            top_k=top_k or self.config.top_k,
+            top_k=effective_top_k,
             filters=filters,
         )
         vector_ranking = self._build_vector_ranking(retrieved_docs)
@@ -439,19 +440,18 @@ class RAGPipeline:
         reranked_docs = retrieved_docs
 
         if use_reranker and retrieved_docs:
-            effective_rerank_top_n = min(rerank_top_n or len(retrieved_docs), len(retrieved_docs))
-            blend_alpha = (
-                rerank_blend_alpha
-                if rerank_blend_alpha is not None
-                else self.config.reranker_blend_alpha
-            )
+            effective_rerank_top_n = rerank_top_n if rerank_top_n is not None else 5
             try:
-                reranked_docs = self.reranker.rerank(
+                from rag_pipeline.retrieval.reranker import BGEM3Reranker
+                if getattr(self, "bge_reranker", None) is None:
+                    self.bge_reranker = BGEM3Reranker()
+
+                reranked_docs = self.bge_reranker.rerank(
                     query=query,
-                    documents=retrieved_docs,
-                    top_n=effective_rerank_top_n,
-                    blend_alpha=blend_alpha,
+                    chunks=retrieved_docs,
+                    top_k=effective_rerank_top_n,
                 )
+                
                 kept_ids = {doc.get("id") for doc in reranked_docs}
                 dropped_after_rerank = [
                     str(doc.get("id"))
