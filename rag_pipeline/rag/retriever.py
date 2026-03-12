@@ -3,86 +3,130 @@
 Keeps retrieval logic behind a small API so future reranking or hybrid search
 can be inserted without changing callers.
 
-Query-intent routing
-─────────────────────
-The retriever classifies each query into one of four intents:
+This retriever now performs query-aware metadata filtering before vector
+search. Queries are classified into:
 
-  • FEATURE   — "feature", "key features", "advantages", "benefits", "highlights"
-  • SPEC      — "specification", "rating", "electrical characteristics", etc.
-  • GRAPH     — "graph", "plot", "curve", "chart", "figure"
-  • GENERAL   — everything else (pure vector similarity)
+- ``table_query``: retrieve only table rows
+- ``graph_query``: retrieve only figure chunks
+- ``general_query``: standard semantic retrieval with figure de-prioritization
 
-For FEATURE and SPEC queries a metadata-filtered primary pass retrieves the
-correct section first, then vector similarity fills any remaining budget.
-
-For GRAPH queries, all figure chunks are retrieved via metadata filter and
-merged with vector results so none are missed.
-
-Figure-chunk deprioritization
-──────────────────────────────
-For non-GRAPH queries, figure chunks that sneak into vector results are
-penalised (score × 0.7) before sorting so textual sections rank higher.
+When the query names a datasheet section such as "dynamic characteristics" or
+"absolute maximum ratings", the retriever adds a section filter as well.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Protocol
+from typing import Any, Dict, List, Optional, Protocol, Sequence
 
 from rag_pipeline.embeddings.bge_embedder import BGEM3Embedder
 from rag_pipeline.vectordb.base import VectorStore
 
 
-# ── Query intent detection ─────────────────────────────────────────────────────
+_GRAPH_KEYWORDS = (
+    "graph",
+    "graphs",
+    "plot",
+    "plots",
+    "curve",
+    "curves",
+    "chart",
+    "charts",
+    "figure",
+    "figures",
+    "waveform",
+    "waveforms",
+    "safe operating area",
+    "soa",
+    "transfer characteristic",
+    "transfer characteristics",
+    "output characteristic",
+    "output characteristics",
+)
 
-_FEATURE_KEYWORDS = {
-    "feature", "features", "key feature", "key features",
-    "advantage", "advantages", "benefit", "benefits",
-    "highlight", "highlights",
+_TABLE_HINT_KEYWORDS = (
+    "table",
+    "tables",
+    "row",
+    "rows",
+    "parameter",
+    "parameters",
+    "rating",
+    "ratings",
+    "specification",
+    "specifications",
+    "spec",
+    "specs",
+    "operating conditions",
+)
+
+_SECTION_ALIASES: dict[str, tuple[str, ...]] = {
+    "dynamic characteristics": ("electrical_characteristics", "dynamic_characteristics"),
+    "electrical characteristics": ("electrical_characteristics",),
+    "absolute maximum ratings": ("absolute_maximum_ratings",),
+    "maximum ratings": ("absolute_maximum_ratings",),
+    "recommended operating conditions": ("recommended_operating_conditions",),
+    "operating conditions": ("recommended_operating_conditions",),
+    "thermal characteristics": ("thermal_characteristics",),
+    "static characteristics": ("electrical_characteristics", "static_characteristics"),
+    "switching characteristics": ("electrical_characteristics", "switching_characteristics"),
 }
 
-_SPEC_KEYWORDS = {
-    "specification", "specifications", "spec", "specs",
-    "rating", "ratings", "electrical characteristic", "electrical characteristics",
-    "absolute maximum", "recommended operating", "thermal characteristic",
-    "typical characteristic", "parameter", "parameters",
+_LEGACY_TYPE_FILTERS: dict[str, tuple[dict[str, dict[str, str]], ...]] = {
+    "table_query": (
+        {"type": {"$eq": "table_row"}},
+        {"chunk_type": {"$eq": "table_row"}},
+        {"chunk_type": {"$eq": "parameter_row"}},
+    ),
+    "graph_query": (
+        {"type": {"$eq": "figure"}},
+        {"chunk_type": {"$eq": "figure"}},
+    ),
 }
 
-_GRAPH_KEYWORDS = {
-    "graph", "graphs", "plot", "plots", "curve", "curves",
-    "chart", "charts", "figure", "figures",
-    "characteristic", "waveform", "vs", "versus",
-}
-
-# Section names stored in ChromaDB metadata for each intent
-_INTENT_SECTION_MAP = {
-    "feature": "features",
-    "spec":    "electrical_characteristics",
-    "graph":   "figures_and_diagrams",
-}
-
-# Score multiplier applied to figure chunks for non-graph queries
 _FIGURE_SCORE_PENALTY = 0.7
 
 
-def _classify_intent(query: str) -> str:
-    """Classify query into 'feature', 'spec', 'graph', or 'general'."""
-    q = query.lower()
-    if any(kw in q for kw in _FEATURE_KEYWORDS):
-        return "feature"
-    if any(kw in q for kw in _SPEC_KEYWORDS):
-        return "spec"
-    if any(kw in q for kw in _GRAPH_KEYWORDS):
-        return "graph"
-    return "general"
+def _normalize_query(query: str) -> str:
+    return " ".join(query.lower().strip().split())
+
+
+def detect_query_sections(query: str) -> List[str]:
+    """Return section aliases inferred from the user query."""
+    q = _normalize_query(query)
+    matches: List[str] = []
+
+    for alias in sorted(_SECTION_ALIASES, key=len, reverse=True):
+        if alias in q:
+            for section_name in _SECTION_ALIASES[alias]:
+                if section_name not in matches:
+                    matches.append(section_name)
+
+    return matches
+
+
+def classify_query_type(query: str) -> str:
+    """Classify a query into table_query, graph_query, or general_query."""
+    q = _normalize_query(query)
+    if not q:
+        return "general_query"
+
+    if any(keyword in q for keyword in _GRAPH_KEYWORDS):
+        return "graph_query"
+
+    if detect_query_sections(q):
+        return "table_query"
+
+    if any(keyword in q for keyword in _TABLE_HINT_KEYWORDS):
+        return "table_query"
+
+    return "general_query"
 
 
 def is_graph_query(query: str) -> bool:
-    """Return True if the query is asking about graphs, charts, or characteristic curves."""
-    return _classify_intent(query) == "graph"
+    """Return True when the query is explicitly asking for graph content."""
+    return classify_query_type(query) == "graph_query"
 
-
-# ── Retriever config ───────────────────────────────────────────────────────────
 
 @dataclass
 class RetrieverConfig:
@@ -98,10 +142,8 @@ class QueryEmbedder(Protocol):
         ...
 
 
-# ── Main retriever ─────────────────────────────────────────────────────────────
-
 class Retriever:
-    """Query embedder + vector store adapter with query-intent routing."""
+    """Query embedder + vector store adapter with metadata-aware retrieval."""
 
     def __init__(
         self,
@@ -113,177 +155,96 @@ class Retriever:
         self.embedder = embedder or BGEM3Embedder()
         self.config = config or RetrieverConfig()
 
-    # ── Public API ─────────────────────────────────────────────────────────────
-
     def retrieve(
         self,
         query: str,
         top_k: Optional[int] = None,
         filters: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
-        """Return top-k chunks for a user query with intent-aware routing.
-
-        Routing behaviour
-        -----------------
-        FEATURE / SPEC queries:
-          1. Metadata-filtered pass → retrieves the dedicated section first.
-          2. Vector similarity pass → fills remaining slots.
-          Figure chunks from vector pass are penalised (×0.7) and sorted to
-          the back so the correct section always leads.
-
-        GRAPH queries:
-          1. Vector similarity pass.
-          2. Metadata-filtered pass → injects ALL figure chunks so none are
-             missed by embedding similarity alone.
-
-        GENERAL queries:
-          Standard vector similarity pass only.  Figure chunks that
-          appear in the results are penalised (×0.7) and re-sorted.
-        """
+        """Return top-k chunks for a user query with query-aware filters."""
         query = query.strip()
         if not query:
             return []
 
         k = top_k or self.config.top_k
-        intent = _classify_intent(query)
+        query_type = classify_query_type(query)
         query_embedding = self.embedder.embed_texts([query])[0]
         normalized_filters = self._normalize_filters(filters)
+        combined_filters = self._build_query_filters(
+            query=query,
+            query_type=query_type,
+            filters=normalized_filters,
+        )
 
-        if intent == "graph":
-            results = self._retrieve_graph(query_embedding, k, normalized_filters)
-        elif intent in ("feature", "spec"):
-            results = self._retrieve_section_first(
-                query_embedding, k, normalized_filters, intent
-            )
-        else:
-            # General query — pure vector pass + figure penalty
-            results = self.vector_store.query(
-                query_embedding=query_embedding,
-                n_results=k,
-                filters=normalized_filters,
-            )
+        results = self.vector_store.query(
+            query_embedding=query_embedding,
+            n_results=k,
+            filters=combined_filters,
+        )
+
+        if query_type == "general_query":
             results = self._penalise_figures(results)
             results.sort(key=lambda d: d.get("score", 0.0), reverse=True)
 
         return results
 
-    # ── Intent-specific helpers ────────────────────────────────────────────────
+    @classmethod
+    def _build_query_filters(
+        cls,
+        query: str,
+        query_type: str,
+        filters: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        clauses: List[Dict[str, Any]] = []
 
-    def _retrieve_section_first(
-        self,
-        query_embedding: List[float],
-        k: int,
-        normalized_filters: Optional[Dict[str, Any]],
-        intent: str,
-    ) -> List[Dict[str, Any]]:
-        """Fetch the target section first via metadata filter, then fill with vector results."""
-        collection = getattr(self.vector_store, "collection", None)
-        section_name = _INTENT_SECTION_MAP[intent]
-        section_docs: List[Dict[str, Any]] = []
+        for key, value in (filters or {}).items():
+            clauses.append({key: {"$eq": value}})
 
-        if collection is not None:
-            try:
-                where: dict = {"section_name": {"$eq": section_name}}
-                if normalized_filters and "part_number" in normalized_filters:
-                    where = {
-                        "$and": [
-                            {"part_number": {"$eq": normalized_filters["part_number"]}},
-                            {"section_name": {"$eq": section_name}},
-                        ]
-                    }
-                raw = collection.get(
-                    where=where,
-                    include=["documents", "metadatas", "ids"],
-                )
-                ids   = raw.get("ids",       []) or []
-                docs  = raw.get("documents", []) or []
-                metas = raw.get("metadatas") or [{}] * len(ids)
+        type_clause = cls._build_type_clause(query_type)
+        if type_clause:
+            clauses.append(type_clause)
 
-                for did, dtxt, dmeta in zip(ids, docs, metas):
-                    section_docs.append({
-                        "id":       did,
-                        "text":     dtxt,
-                        "metadata": dmeta,
-                        # Boost section-matched chunks so they always lead
-                        "score":    1.5,
-                    })
-            except Exception:
-                pass  # non-fatal: fall through to vector-only path
+        section_clause = cls._build_section_clause(query, query_type)
+        if section_clause:
+            clauses.append(section_clause)
 
-        # Vector similarity pass to fill remaining budget
-        seen_ids: set = {d.get("id") for d in section_docs}
-        remaining = max(k - len(section_docs), k)  # always do a full pass for ranking
-        vector_results = self.vector_store.query(
-            query_embedding=query_embedding,
-            n_results=remaining,
-            filters=normalized_filters,
-        )
+        return cls._combine_clauses(clauses)
 
-        # Merge: add vector results not already in the section-filtered set
-        for vdoc in vector_results:
-            if vdoc.get("id") not in seen_ids:
-                # Penalise figure chunks that sneak into non-graph results
-                if self._is_figure(vdoc):
-                    vdoc = dict(vdoc)
-                    vdoc["score"] = vdoc.get("score", 0.0) * _FIGURE_SCORE_PENALTY
-                section_docs.append(vdoc)
-                seen_ids.add(vdoc.get("id"))
+    @staticmethod
+    def _build_type_clause(query_type: str) -> Optional[Dict[str, Any]]:
+        type_filters = _LEGACY_TYPE_FILTERS.get(query_type)
+        if not type_filters:
+            return None
+        if len(type_filters) == 1:
+            return type_filters[0]
+        return {"$or": list(type_filters)}
 
-        # Sort: section-filtered chunks lead (score=1.5), then by similarity
-        section_docs.sort(key=lambda d: d.get("score", 0.0), reverse=True)
-        return section_docs[:k]
+    @staticmethod
+    def _build_section_clause(query: str, query_type: str) -> Optional[Dict[str, Any]]:
+        if query_type != "table_query":
+            return None
 
-    def _retrieve_graph(
-        self,
-        query_embedding: List[float],
-        k: int,
-        normalized_filters: Optional[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
-        """Vector pass + inject all figure chunks for graph-related queries."""
-        results = self.vector_store.query(
-            query_embedding=query_embedding,
-            n_results=k,
-            filters=normalized_filters,
-        )
+        section_names = detect_query_sections(query)
+        if not section_names:
+            return None
 
-        collection = getattr(self.vector_store, "collection", None)
-        if collection is not None:
-            try:
-                where: dict = {"$or": [
-                    {"type":       {"$eq": "figure"}},
-                    {"chunk_type": {"$eq": "figure"}},
-                ]}
-                if normalized_filters and "part_number" in normalized_filters:
-                    where = {
-                        "$and": [
-                            {"part_number": {"$eq": normalized_filters["part_number"]}},
-                            where,
-                        ]
-                    }
-                raw = collection.get(
-                    where=where,
-                    include=["documents", "metadatas", "ids"],
-                )
-                ids   = raw.get("ids",       []) or []
-                docs  = raw.get("documents", []) or []
-                metas = raw.get("metadatas") or [{}] * len(ids)
+        section_filters: List[Dict[str, Any]] = []
+        for section_name in section_names:
+            section_filters.append({"section": {"$eq": section_name}})
+            section_filters.append({"section_name": {"$eq": section_name}})
 
-                seen_ids = {d.get("id") for d in results}
-                for did, dtxt, dmeta in zip(ids, docs, metas):
-                    if did not in seen_ids:
-                        results.append({
-                            "id":       did,
-                            "text":     dtxt,
-                            "metadata": dmeta,
-                            "score":    1.0,
-                        })
-                        seen_ids.add(did)
-            except Exception:
-                pass  # non-fatal: fall back to vector results only
+        if len(section_filters) == 1:
+            return section_filters[0]
+        return {"$or": section_filters}
 
-        return results
-
-    # ── Utility helpers ────────────────────────────────────────────────────────
+    @staticmethod
+    def _combine_clauses(clauses: Sequence[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        clean_clauses = [clause for clause in clauses if clause]
+        if not clean_clauses:
+            return None
+        if len(clean_clauses) == 1:
+            return clean_clauses[0]
+        return {"$and": list(clean_clauses)}
 
     @staticmethod
     def _is_figure(doc: Dict[str, Any]) -> bool:
@@ -301,12 +262,7 @@ class Retriever:
         """Reduce scores of figure chunks so textual sections rank higher."""
         penalised = []
         for doc in results:
-            meta = doc.get("metadata") or {}
-            if (
-                meta.get("chunk_type") == "figure"
-                or meta.get("type") == "figure"
-                or meta.get("section_name") == "figures_and_diagrams"
-            ):
+            if Retriever._is_figure(doc):
                 doc = dict(doc)
                 doc["score"] = doc.get("score", 0.0) * _FIGURE_SCORE_PENALTY
             penalised.append(doc)
@@ -314,12 +270,7 @@ class Retriever:
 
     @staticmethod
     def _normalize_filters(filters: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-        """Normalize metadata filters for backend compatibility.
-
-        Chroma metadata was persisted as scalar values; this keeps filters
-        equality-based and supports CLI patterns like:
-            --filter parameter collectorBaseVoltage
-        """
+        """Normalize metadata filters for backend compatibility."""
         if not filters:
             return None
 

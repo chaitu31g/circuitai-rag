@@ -105,6 +105,7 @@ def format_table_rows(table: dict, section_name: str, part_number: str, table_nu
             # So I will not add extra strings that pollute the chunk text.
             
             metadata = {
+                "type": "table_row",
                 "component_name": part_number,
                 "part_number": part_number,
                 "section": section_name,

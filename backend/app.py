@@ -16,7 +16,11 @@ from backend.llm.hf_llm import load_model_once, generate_response, stream_respon
 from rag_pipeline.services.ingest_service import ingest_pdf_pipeline, get_embedder
 from rag_pipeline.vectordb.chroma_store import ChromaStore
 from rag_pipeline.rag.rag_pipeline import RAGPipeline, RAGConfig
-from rag_pipeline.rag.retriever import Retriever, RetrieverConfig
+from rag_pipeline.rag.retriever import (
+    Retriever,
+    RetrieverConfig,
+    classify_query_type,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
@@ -59,22 +63,13 @@ def _keepalive() -> str:
     return ": keep-alive\n\n"
 
 
-# Keywords that signal the user is asking about a graph / figure
-_GRAPH_KEYWORDS = {
-    "graph", "graphs", "curve", "curves", "plot", "plots", "chart", "charts",
-    "figure", "figures", "trend", "relationship",
-    "vs", "versus", "function", "characteristic", "waveform",
-    "safe operating", "soa", "power dissipation", "transfer",
-}
-
 # Keywords that indicate a counting intent
 _COUNT_KEYWORDS = {"how many", "number of", "count", "total"}
 
 
 def _is_graph_query(query: str) -> bool:
     """Return True if the query is asking about a graph, chart, or characteristic curve."""
-    q = query.lower()
-    return any(kw in q for kw in _GRAPH_KEYWORDS)
+    return classify_query_type(query) == "graph_query"
 
 
 def _is_count_graph_query(query: str) -> bool:

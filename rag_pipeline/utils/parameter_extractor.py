@@ -171,6 +171,7 @@ def extract_parameter_rows(table: dict, section_name: str, part_number: str, tab
             text = "\n".join(parts)
             
             metadata = {
+                "type": "table_row",
                 "component_name": part_number,
                 "part_number": part_number,
                 "section": section_name,
