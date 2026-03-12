@@ -1,10 +1,46 @@
 import { useState, useRef, useEffect } from 'react';
-import axios from 'axios';
 import { API_BASE_URL } from '../config';
 import {
-  Send, Bot, User, Loader2, BookOpen,
+  Send, Bot, User, Loader2, BookOpen, Trash2,
   ChevronDown, ChevronUp, Cpu, Zap,
 } from 'lucide-react';
+
+const CHAT_HISTORY_STORAGE_KEY = 'circuitai_chat_history';
+const DEFAULT_ASSISTANT_MESSAGE = {
+  role: 'assistant',
+  content: "Hello! I'm CircuitAI. Ask me anything about the components in your knowledge base — specs, ratings, features, or pin configurations.",
+  sources: [],
+};
+
+function sanitizeStoredMessages(rawMessages) {
+  if (!Array.isArray(rawMessages) || rawMessages.length === 0) {
+    return [DEFAULT_ASSISTANT_MESSAGE];
+  }
+
+  const sanitized = rawMessages
+    .filter((msg) => msg && typeof msg === 'object' && typeof msg.role === 'string')
+    .map((msg) => ({
+      role: msg.role,
+      content: typeof msg.content === 'string' ? msg.content : '',
+      sources: Array.isArray(msg.sources) ? msg.sources : [],
+      directMode: Boolean(msg.directMode),
+      loading: false,
+    }));
+
+  return sanitized.length > 0 ? sanitized : [DEFAULT_ASSISTANT_MESSAGE];
+}
+
+function loadMessagesFromStorage() {
+  if (typeof window === 'undefined') return [DEFAULT_ASSISTANT_MESSAGE];
+
+  try {
+    const savedMessages = window.localStorage.getItem(CHAT_HISTORY_STORAGE_KEY);
+    if (!savedMessages) return [DEFAULT_ASSISTANT_MESSAGE];
+    return sanitizeStoredMessages(JSON.parse(savedMessages));
+  } catch {
+    return [DEFAULT_ASSISTANT_MESSAGE];
+  }
+}
 
 // ── Minimal markdown renderer ─────────────────────────────────────────────────
 function MarkdownContent({ text = '', isStreaming = false }) {
@@ -241,13 +277,7 @@ function ComponentDropdown({ components, value, onChange }) {
 
 // ── Main ChatPanel ────────────────────────────────────────────────────────────
 export default function ChatPanel({ components = [] }) {
-  const [messages, setMessages]         = useState([
-    {
-      role: 'assistant',
-      content: "Hello! I'm CircuitAI. Ask me anything about the components in your knowledge base — specs, ratings, features, or pin configurations.",
-      sources: [],
-    }
-  ]);
+  const [messages, setMessages]         = useState(loadMessagesFromStorage);
   const [input, setInput]               = useState('');
   const [loading, setLoading]           = useState(false);
   const [componentFilter, setComponentFilter] = useState('');
@@ -257,12 +287,40 @@ export default function ChatPanel({ components = [] }) {
   const [elapsed, setElapsed] = useState(0);
   const elapsedRef = useRef(null);
 
+  useEffect(() => () => clearInterval(elapsedRef.current), []);
+
   // Auto-scroll only the chat container
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [messages]);
+
+  // Persist chat history so tab/mode switches do not reset conversation
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    try {
+      window.localStorage.setItem(
+        CHAT_HISTORY_STORAGE_KEY,
+        JSON.stringify(messages)
+      );
+    } catch {
+      // Ignore storage failures (quota/private mode)
+    }
+  }, [messages]);
+
+  const clearChat = () => {
+    if (typeof window !== 'undefined') {
+      window.localStorage.removeItem(CHAT_HISTORY_STORAGE_KEY);
+    }
+
+    clearInterval(elapsedRef.current);
+    setMessages([DEFAULT_ASSISTANT_MESSAGE]);
+    setLoading(false);
+    setElapsed(0);
+    inputRef.current?.focus();
+  };
 
   const sendMessage = async () => {
     const query = input.trim();
@@ -428,13 +486,25 @@ export default function ChatPanel({ components = [] }) {
         </div>
 
         {/* Component filter — custom dark dropdown */}
-        {components.length > 0 && (
-          <ComponentDropdown
-            components={components}
-            value={componentFilter}
-            onChange={setComponentFilter}
-          />
-        )}
+        <div className="flex items-center gap-2">
+          {components.length > 0 && (
+            <ComponentDropdown
+              components={components}
+              value={componentFilter}
+              onChange={setComponentFilter}
+            />
+          )}
+          <button
+            type="button"
+            onClick={clearChat}
+            disabled={loading}
+            className="flex items-center gap-1.5 bg-slate-800 border border-slate-600/60 hover:border-red-500/60 text-slate-300 hover:text-red-300 text-xs rounded-lg px-3 py-2 transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:border-slate-600/60 disabled:hover:text-slate-300"
+            title="Clear chat history"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+            Clear Chat
+          </button>
+        </div>
       </div>
 
       {/* Messages */}

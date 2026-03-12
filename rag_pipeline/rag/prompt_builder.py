@@ -45,16 +45,20 @@ JSON_SPEC_SYSTEM_PROMPT = (
 RAG_ANSWER_SYSTEM_PROMPT = (
     "You are an electronics engineer answering using datasheet context.\n\n"
     "Instructions:\n\n"
-    "1. Use ONLY the provided context.\n"
-    "2. If numeric constraints exist, state them directly.\n"
-    "3. If multiple constraints exist, summarize them clearly.\n"
-    "4. Preserve units and conditions.\n"
-    "5. Do NOT say the value is unspecified if constraints are present.\n"
+    "1. If the question refers to datasheet parameters, extract values directly from the provided context.\n"
+    "2. Do NOT generate theoretical explanations (e.g., describing how a MOSFET works instead of listing values).\n"
+    "3. Preserve symbols exactly as written (Ciss, Coss, Crss, td(on), etc.).\n"
+    "4. Include units and conditions if present.\n"
+    "5. Prefer table-style answers when parameters come from a datasheet table.\n"
     "6. Do NOT invent values.\n"
-    "7. If the context contains figure descriptions or diagram summaries that are "
-    "not relevant to the question, ignore them — base your answer on the textual content only.\n\n"
+    "7. Use ONLY the provided context. Ignore figure descriptions that are not relevant to the question.\n\n"
+    "Example Output Format:\n"
+    "Parameter: Input capacitance\n"
+    "Symbol: Ciss\n"
+    "Typical: 32 pF\n"
+    "Maximum: 41 pF\n\n"
     "Answer style:\n"
-    "Concise technical datasheet explanation using retrieved values."
+    "Structured parameter extraction."
 )
 
 SECTION_SYNTHESIS_SYSTEM_PROMPT = (
@@ -195,11 +199,9 @@ class DatasheetPromptBuilder:
         refs = ", ".join(context_chunk_ids or [])
         refs_line = f"\nContext chunk IDs: {refs}" if refs else ""
         user_prompt = (
-            "Answer the question only from datasheet context.\n"
-            "If constraints are present, report them directly with units and conditions.\n"
-            "If multiple constraints are present, summarize each clearly in one concise explanation.\n"
-            "If the context contains figure descriptions or diagram summaries not relevant to the question, ignore them.\n"
-            "Only say the value is not specified when no relevant constraint exists in context.\n\n"
+            "Answer the question strictly using the datasheet context.\n"
+            "If the question asks for specifications, output them in the structured table-style format, ensuring symbols, units, and conditions are exactly preserved.\n"
+            "Do not attempt to explain the theoretical meaning of the parameters.\n\n"
             f"Question:\n{query}\n\n"
             f"Datasheet Context:\n{context}{refs_line}"
         )
