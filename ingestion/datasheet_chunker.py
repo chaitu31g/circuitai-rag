@@ -412,30 +412,105 @@ def chunk_section(
     return result
 
 
-# ---------------------------------------------------------------------------
-# Top-level chunker  (dual-pass: semantic + sliding-window coverage)
-# ---------------------------------------------------------------------------
+def _get_table_contexts(docling_data: dict) -> dict:
+    """Refined Context Tracking utilizing Docling's 'body' hierarchy with spatial fallback.
+    Returns: table_index -> (section_name, table_title)
+    """
+    body = docling_data.get("body", {})
+    children = body.get("children", [])
+    texts = docling_data.get("texts", [])
+    groups = docling_data.get("groups", [])
+    tables = docling_data.get("tables", [])
+    
+    table_contexts = {}
+    current_section = "description"
+    last_heading = "Table"
+    
+    # 1. Hierarchy Pass
+    def traverse(ref):
+        nonlocal current_section, last_heading
+        if not isinstance(ref, str) or not ref.startswith("#/"):
+            return
+        parts = ref.split("/")
+        if len(parts) < 3: return
+        etype = parts[1]
+        try:
+            eidx = int(parts[2])
+        except: return
+        
+        if etype == "texts" and eidx < len(texts):
+            t = texts[eidx]
+            txt = t.get("text", "").strip()
+            label = t.get("label", "text").lower()
+            det = _detect_section(txt)
+            if det and any(h in label for h in ("header", "title", "heading")):
+                current_section = det
+                last_heading = txt
+            elif any(h in label for h in ("header", "title", "heading", "caption")):
+                last_heading = txt
+            elif "Table" in txt and len(txt) < 120:
+                last_heading = txt
+        elif etype == "tables":
+            table_contexts[eidx] = (current_section, last_heading)
+        elif etype == "groups" and eidx < len(groups):
+            for child in groups[eidx].get("children", []):
+                cref = child.get("$ref")
+                if cref: traverse(cref)
+
+    for child in children:
+        ref = child.get("$ref")
+        if ref: traverse(ref)
+
+    # 2. Spatial Fallback for any disconnected tables
+    for i in range(len(tables)):
+        if i in table_contexts: continue
+        
+        tbl = tables[i]
+        t_prov = (tbl.get("prov") or [{}])[0]
+        t_page = t_prov.get("page_no")
+        t_bbox = t_prov.get("bbox", {})
+        t_y = t_bbox.get("t", 0) if isinstance(t_bbox, dict) else 0
+        
+        best_sec = "description"
+        best_title = "Table"
+        min_dist = float('inf')
+        
+        for t in texts:
+            prov = (t.get("prov") or [{}])[0]
+            page = prov.get("page_no")
+            if page is None or t_page is None or page > t_page: continue
+            
+            # If same page, must be above
+            bbox = prov.get("bbox", {})
+            y = bbox.get("t", 0) if isinstance(bbox, dict) else 0
+            if page == t_page and y >= t_y and t_y > 0: continue
+            
+            txt = t.get("text", "").strip()
+            label = t.get("label", "text").lower()
+            
+            # Track most recent section
+            det = _detect_section(txt)
+            if det and any(h in label for h in ("header", "title", "heading")):
+                best_sec = det
+            
+            # Check if this could be the title
+            if any(h in label for h in ("header", "title", "heading", "caption")):
+                dist = (t_page - page) * 2000 + (t_y - y)
+                if dist < min_dist:
+                    min_dist = dist
+                    best_title = txt
+                    
+        table_contexts[i] = (best_sec, best_title)
+            
+    return table_contexts
+
 
 def chunk_document(
     docling_data: dict, 
     part_number: Optional[str] = None,
     pdf_path: Optional[Path] = None
 ) -> list[Chunk]:
-    """Chunk an entire parsed datasheet with zero data loss.
-
-    Strategy
-    --------
-    Pass 1 — Semantic:
-        Group text blocks into named sections (features, electrical_characteristics,
-        etc.), create smart table chunks, and figure chunks with captions.
-        Only ``revision_history`` and ``legal`` sections are skipped.
-
-    Pass 2 — Sliding-window coverage:
-        Walk every raw text block that was NOT fully absorbed into a semantic
-        chunk and emit overlapping window chunks.  This guarantees that
-        badly-formatted PDFs, unusual section names, or edge-case text still
-        make it into the vector store.
-    """
+    """Chunk an entire parsed datasheet with zero data loss."""
     texts    = docling_data.get("texts",    [])
     tables   = docling_data.get("tables",   [])
     pictures = docling_data.get("pictures", [])
@@ -459,11 +534,6 @@ def chunk_document(
         all_chunks.append(chunk)
 
     def _add_figure(chunk: Optional[Chunk]) -> None:
-        """Add a figure chunk without the MIN_CHUNK_LENGTH guard.
-
-        Figures should NEVER be silently dropped due to a short fallback text.
-        The figure_index embedded in the text already ensures uniqueness.
-        """
         if chunk is None:
             return
         key = chunk.text.strip()
@@ -488,11 +558,9 @@ def chunk_document(
         if not txt:
             continue
 
-        # Skip purely decorative labels
         if label in _SKIP_LABELS:
             continue
 
-        # Detect section boundary from headers or short text lines
         detected = None
         if label in ("section_header", "title"):
             detected = _detect_section(txt)
@@ -501,46 +569,51 @@ def chunk_document(
 
         if detected:
             current_section = detected
-            # Set retrieval priority
             section_priority.setdefault(detected, {
                 "features": 10, "description": 8, "applications": 7,
                 "electrical_characteristics": 9, "absolute_maximum_ratings": 9,
             }.get(detected, 3))
-            # IMPORTANT: also store the header text itself so "Features" etc. is searchable
             if len(txt) >= MIN_CHUNK_LENGTH and detected not in _SKIP_TYPES:
                 sections.setdefault(detected, []).insert(0, txt)
             continue
 
-        # Skip content from sections flagged as useless
         if current_section in _SKIP_TYPES:
             continue
 
         sections.setdefault(current_section, []).append(txt)
-        seen_raws.add(txt)  # mark as semantically absorbed
+        seen_raws.add(txt)
 
-    # Emit structured chunks
     for sec_name, sec_texts in sections.items():
         priority = section_priority.get(sec_name, 0)
         for chunk in chunk_section(sec_name, sec_texts, part_number, priority):
             _add(chunk)
 
-    # Tables — assign to nearest section by page, with sequential table number
+    # Tables — Use document hierarchy for titles and sections
+    table_contexts = _get_table_contexts(docling_data)
+    
     for i, tbl in enumerate(tables):
-        page     = (tbl.get("prov") or [{}])[0].get("page_no")
-        best_sec = "electrical_characteristics"
-        for t in texts:
-            t_page = (t.get("prov") or [{}])[0].get("page_no") if t.get("prov") else None
-            if t_page == page:
-                d = _detect_section(t.get("text", ""))
-                if d and d not in _SKIP_TYPES:
-                    best_sec = d
-                    break
+        ctx = table_contexts.get(i)
+        if ctx:
+            best_sec, table_title = ctx
+        else:
+            # Fallback to page-based logic if hierarchy failed
+            page     = (tbl.get("prov") or [{}])[0].get("page_no")
+            best_sec = "electrical_characteristics"
+            for t in texts:
+                t_page = (t.get("prov") or [{}])[0].get("page_no") if t.get("prov") else None
+                if t_page == page:
+                    d = _detect_section(t.get("text", ""))
+                    if d and d not in _SKIP_TYPES:
+                        best_sec = d
+                        break
+            table_title = ""
+
         from rag_pipeline.utils.parameter_extractor import extract_parameter_rows
-        row_chunks = extract_parameter_rows(tbl, best_sec, part_number, i + 1)
+        row_chunks = extract_parameter_rows(tbl, best_sec, part_number, i + 1, table_title=table_title)
         for rc in row_chunks:
             _add(rc)
 
-    # Figures — try to find nearby captions if missing
+    # Figures
     for fig in pictures:
         if not fig.get("captions"):
             f_prov = (fig.get("prov") or [{}])[0]
@@ -548,56 +621,38 @@ def chunk_document(
             f_bbox = f_prov.get("bbox")
             
             if f_page and f_bbox:
-                # Search for text blocks on same page that look like captions
-                # and haven't been absorbed yet
                 best_cap = None
                 min_dist = float('inf')
-                
-                f_y = f_bbox.get("t", 0) # Top coord (assuming BOTTOMLEFT origin is handled)
+                f_y = f_bbox.get("t", 0)
                 
                 for t in texts:
                     t_text = t.get("text", "").strip()
                     if not t_text or t_text in seen_raws:
                         continue
-                        
                     t_prov = (t.get("prov") or [{}])[0]
                     if t_prov.get("page_no") != f_page:
                         continue
-                        
-                    # Pattern for common engineering figure labels and typical technical headers
                     is_potential_cap = (
                         re.match(r"^(Figure|Fig|Chart|Graph|Scheme|Diagram|Table)\.?\s*(\d+|[A-Z])", t_text, re.I) or
                         any(kw in t_text for kw in ["Curve", "Characteristic", "Plot", "Waveform", "Diagram", "Circuit"])
                     ) and len(t_text) < 150
-                    
                     if is_potential_cap:
                         t_bbox = t_prov.get("bbox")
                         if t_bbox:
-                            # Vertical distance check
                             dist = abs(t_bbox.get("t", 0) - f_y)
                             if dist < min_dist:
                                 min_dist = dist
                                 best_cap = t_text
-                
                 if best_cap and min_dist < 200:
                     fig["captions"] = [{"text": best_cap}]
                     seen_raws.add(best_cap)
 
     for fig_idx, fig in enumerate(pictures):
         _add_figure(chunk_figure(fig, part_number, pdf_path=pdf_path, figure_index=fig_idx))
-        logger.info(
-            "Figure chunk %d/%d processed for %s",
-            fig_idx + 1, len(pictures), part_number,
-        )
 
     # ═══════════════════════════════════════════════════════════════════════
     # PASS 2 — Sliding-window coverage guarantee
     # ═══════════════════════════════════════════════════════════════════════
-    # Collect every raw text block (except noise labels) that was either:
-    #   a) in a skipped section and never absorbed, OR
-    #   b) not detected by section logic (edge-case text)
-    # Then emit overlapping window chunks from the combined text.
-
     unabsorbed: list[str] = []
     for t in texts:
         label = t.get("label", "text")
@@ -605,17 +660,14 @@ def chunk_document(
         if not txt or label in _SKIP_LABELS:
             continue
         if txt in seen_raws:
-            continue   # already captured in a semantic chunk
+            continue
         unabsorbed.append(txt)
 
     if unabsorbed:
-        # Also slide a window over ALL text (not just unabsorbed) for boundary safety
         all_raw = "\n".join(t.get("text", "").strip()
                             for t in texts
                             if t.get("text", "").strip()
                             and t.get("label", "text") not in _SKIP_LABELS)
-
-        # Character-level sliding window
         pos = 0
         win_idx = 0
         while pos < len(all_raw):

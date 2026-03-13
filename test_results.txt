@@ -1,0 +1,28 @@
+Total children: 15
+Text [page_header]: BSS138N
+Text [section_header]: SIPMOS ® Small-Signal-Transistor
+Text [section_header]: Features
+Text [list_item]: N-channel
+Text [list_item]: Enhancement mode
+Text [list_item]: Logic level
+Text [list_item]: d v /d t rated
+Text [list_item]: Pb-free lead-plating; RoHS compliant
+Text [list_item]: Qualified according to AEC Q101
+Text [list_item]: Halogen free according to IEC61249-2-21
+Text [section_header]: Product Summary
+*** Table 0 found! ***
+    Section: Product Summary
+    Possible Title: Unknown Table
+----------------------------------------
+Text [section_header]: PG-SOT-23
+*** Table 1 found! ***
+    Section: PG-SOT-23
+    Possible Title: Unknown Table
+----------------------------------------
+*** Table 2 found! ***
+    Section: PG-SOT-23
+    Possible Title: Unknown Table
+----------------------------------------
+Text [page_footer]: Rev. 2.86 Rev. 2.86
+Text [page_footer]: page 1 page 1
+Text [page_footer]: 2012-04-17 2012-04-17
