@@ -151,6 +151,7 @@ def enrich_with_table_rows(
             if not key or len(key) < _MIN_CHUNK_LEN or key in seen:
                 continue
             seen.add(key)
+            page = (table.get("prov") or [{}])[0].get("page_no")
             result.append({
                 "text":       row_text,
                 "chunk_type": "table_row",
@@ -158,6 +159,7 @@ def enrich_with_table_rows(
                     "part_number":  part_number,
                     "section_name": section,
                     "table_number": i + 1,
+                    "page_number":  page,
                     "chunk_source": "table_formatter",
                 },
             })
