@@ -130,12 +130,18 @@ _load_lock = threading.Lock()
 
 # System prompt injected via the chat template for every query.
 _SYSTEM_PROMPT = (
-    "You are an expert electronics engineer answering questions based solely on the provided datasheet context. "
-    "Provide detailed, thorough technical answers. Explain each point clearly. "
-    "Use bullet points (- item) when listing multiple features, specs, or characteristics. "
-    "Never invent, estimate, or infer values not present in the context. "
-    "If the answer cannot be found in the provided context, say so clearly. "
-    "CRITICAL INSTRUCTION: DO NOT output any thinking process, step-by-step analysis, rationale, or drafts. Output EXACTLY AND ONLY the final direct answer."
+    "### ROLE:\n"
+    "You are a High-Precision Power Electronics Engineer. Your goal is to extract technical specifications from semiconductor datasheets with 100% data integrity.\n\n"
+    "### DATA EXTRACTION PROTOCOL:\n"
+    "1. IDENTIFY THE TABLE: Find the \"Static Characteristics\" or \"Electrical Characteristics\" table in the provided context.\n"
+    "2. ROW-BY-ROW SCAN: For every parameter (e.g., R(DS(on)), V(GS(th))), check if there are multiple rows with different test conditions.\n"
+    "3. CAPTURE ALL VARIANTS: If a parameter has multiple values based on different V(GS), I(D), or T(j), you MUST list every single one.\n"
+    "4. FORMATTING: Use a Markdown Table for your response to maintain the grid structure of the original datasheet.\n\n"
+    "### STRICT CONSTRAINTS:\n"
+    "- NEVER summarize multiple rows into a single \"typical\" value.\n"
+    "- ALWAYS include the \"Test Conditions\" column (e.g., V(GS)=4.5V, I(D)=0.03A).\n"
+    "- ALWAYS include the \"Units\" (V, A, Ω, µA, nA).\n"
+    "- If the data is cut off or missing, state: \"Data fragment detected; full table not available in current context.\"\n"
 )
 
 # Reasoning-step patterns to strip from model output.
@@ -209,25 +215,16 @@ def build_prompt(context: str, query: str) -> list[dict]:
     passed to the tokenizer's apply_chat_template(). This approach works
     correctly for Qwen3.5 and any other instruction-tuned model without
     manual prompt format management.
-
-    The prompt is structured to produce a detailed technical answer with
-    bullet points where applicable — no chain-of-thought or reasoning steps.
     """
     # Clean LaTeX from retrieved context before it enters the prompt so the
     # model never sees raw math notation and is less likely to reproduce it.
     context = clean_latex_symbols(context)
 
     user_content = (
-        "You are an expert electronics engineer.\n\n"
-        "Answer the user's question in detail, taking all key points from the datasheet context below and explaining each one clearly.\n"
-        "Format your answer as follows:\n"
-        "- If the answer involves multiple features, properties, or characteristics, list each as a bullet point (- item) and briefly explain what it means technically.\n"
-        "- If the answer is a single value or fact, state it directly with a short explanation.\n"
-        "- Base your entire answer strictly on the datasheet context below — do not invent or generalize.\n\n"
-        "IMPORTANT: DO NOT include any chain-of-thought, 'Thinking Process', step-by-step analysis, or drafts in your response. "
-        "Output ONLY the final answer.\n\n"
-        f"Datasheet Context:\n{context}\n\n"
-        f"Question:\n{query}"
+        f"### CONTEXT:\n{context}\n\n"
+        f"### USER QUERY:\n{query}\n\n"
+        "### FINAL OUTPUT:\n"
+        "(Provide the result as a detailed Markdown table following the datasheet's layout)"
     )
     return [
         {"role": "system",  "content": _SYSTEM_PROMPT},
