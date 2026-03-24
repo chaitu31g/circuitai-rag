@@ -19,11 +19,12 @@ pip install "docling-parse>=3.0.0,<4.0.0" "pypdfium2>=4.30.0,<5.0.0" "docling-ib
 
 echo "--- Tier 5: Missing Gears (Manual Sub-dependencies) ---"
 pip install pydantic fastapi "uvicorn>=0.34.0" python-multipart python-dotenv \
-    bcrypt build chroma-hnswlib kubernetes posthog pypika \
+    "requests>=2.32.4" bcrypt build chroma-hnswlib kubernetes posthog pypika \
     dataclasses-json deprecated dirtyjson filetype tinytag typing-inspect \
     llama-index-workflows jsonref latex2mathml deepsearch-glm easyocr \
     marko python-docx python-pptx jsonlines banks lxml "typer>=0.24.0" \
     onnxruntime "opentelemetry-api==1.38.0" "opentelemetry-sdk==1.38.0" \
-    "opentelemetry-exporter-otlp-proto-grpc==1.38.0" "opentelemetry-instrumentation-fastapi==0.46b0"
+    "opentelemetry-exporter-otlp-proto-grpc==1.38.0" "opentelemetry-exporter-otlp-proto-common==1.38.0" \
+    "opentelemetry-proto==1.38.0" "opentelemetry-instrumentation-fastapi==0.46b0"
 
 echo "Done! 5-Tier installation complete."
