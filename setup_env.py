@@ -38,12 +38,13 @@ def main():
     # Tier 5
     print("\n--- Tier 5: Missing Gears (Manual Sub-dependencies) ---")
     run_pip([
-        "install", "pydantic", "fastapi", "uvicorn", "python-multipart", "python-dotenv",
+        "install", "pydantic", "fastapi", "uvicorn>=0.34.0", "python-multipart", "python-dotenv",
         "bcrypt", "build", "chroma-hnswlib", "kubernetes", "posthog", "pypika",
         "dataclasses-json", "deprecated", "dirtyjson", "filetype", "tinytag", "typing-inspect",
         "llama-index-workflows", "jsonref", "latex2mathml", "deepsearch-glm", "easyocr",
-        "marko", "python-docx", "python-pptx", "jsonlines", "banks", "lxml", "typer",
-        "onnxruntime", "opentelemetry-exporter-otlp-proto-grpc", "opentelemetry-instrumentation-fastapi"
+        "marko", "python-docx", "python-pptx", "jsonlines", "banks", "lxml", "typer>=0.24.0",
+        "onnxruntime", "opentelemetry-api==1.38.0", "opentelemetry-sdk==1.38.0",
+        "opentelemetry-exporter-otlp-proto-grpc==1.38.0", "opentelemetry-instrumentation-fastapi==0.46b0"
     ])
 
     print("\n=== All Tiers Installed! Environment is fixed. ===")
