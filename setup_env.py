@@ -50,6 +50,13 @@ def main():
         "opentelemetry-instrumentation==0.59b0", "opentelemetry-semantic-conventions==0.59b0", "opentelemetry-util-http==0.59b0"
     ])
 
+    print("\n--- Tier 6: Final Pin (Restore AI Engine Hub Version) ---")
+    run_pip([
+        "install",
+        "huggingface-hub>=1.7.0",   # Tier 4 docling-ibm-models downgrades this — restore it
+        "setuptools>=80.9.0",        # llama-index-core requires this
+    ])
+
     print("\n=== All Tiers Installed! Environment is fixed. ===")
 
 if __name__ == "__main__":

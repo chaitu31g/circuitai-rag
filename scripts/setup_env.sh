@@ -29,4 +29,7 @@ pip install pydantic fastapi "uvicorn>=0.34.0" python-multipart python-dotenv \
     "opentelemetry-instrumentation-fastapi==0.59b0" "opentelemetry-instrumentation-asgi==0.59b0" \
     "opentelemetry-instrumentation==0.59b0" "opentelemetry-semantic-conventions==0.59b0" "opentelemetry-util-http==0.59b0"
 
+echo "--- Tier 6: Final Pin (Restore AI Engine Hub Version) ---"
+pip install "huggingface-hub>=1.7.0" "setuptools>=80.9.0"
+
 echo "Done! 5-Tier installation complete."
