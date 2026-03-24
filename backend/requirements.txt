@@ -14,10 +14,10 @@ chromadb==0.5.21
 sentence-transformers>=2.7.0
 
 # ── PDF parsing (Docling) ─────────────────────────────────────────────────────
-docling>=2.14.0,<2.30.0      # 2.14+ has docling-parse 5.x; <2.30 avoids rapidocr/polyfactory deps
+docling>=2.81.0               # 2.81+ uses docling-parse 5.x (has DecodePageConfig)
 docling-core
-docling-parse>=5.0.0          # docling>=2.14 requires this (3.x lacks DecodePageConfig)
-docling-ibm-models>=2.0.6,<3.0.0  # layout/table models; <3.0 matches docling<2.30
+docling-parse>=5.0.0          # 5.x required by docling 2.81+
+docling-ibm-models>=3.12.0,<4.0.0  # layout/table models for docling 2.81
 PyMuPDF==1.25.1
 huggingface-hub
 
@@ -66,5 +66,6 @@ jsonlines
 banks
 lxml
 typer
-pylatexenc                    # required by docling>=2.14 latex backend
-polyfactory>=2.22.2           # required by docling 2.2x+
+pylatexenc                    # required by docling latex backend
+polyfactory>=2.22.2           # required by docling 2.81+
+rapidocr>=3.3,<4.0.0          # required by docling 2.81+
