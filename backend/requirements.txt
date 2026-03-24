@@ -69,3 +69,4 @@ typer
 pylatexenc                    # required by docling latex backend
 polyfactory>=2.22.2           # required by docling 2.81+
 rapidocr>=3.3,<4.0.0          # required by docling 2.81+
+colorlog                      # required by rapidocr
