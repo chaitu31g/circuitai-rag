@@ -242,38 +242,95 @@ def load_model_once(model_id: str = MODEL_NAME) -> None:
 
 
 def build_prompt(context: str, query: str) -> list[dict]:
-    """Build the chain-of-thought chat messages list for a RAG query.
+    """Build a few-shot chain-of-thought prompt for a RAG query.
 
-    The user message scaffolds the mandatory <THINKING> block so the model
-    reasons through exact-match row selection before emitting the table.
-    The <THINKING> block is stripped by _filter_reasoning_steps() before
-    the response reaches the user.
+    The user message contains:
+      1. A hardcoded few-shot demonstration showing correct multi-row extraction.
+      2. The mandatory <THINKING> CoT scaffold so the model reasons before writing.
+      3. The actual retrieved context and user query.
 
-    Returns a list of message dicts for apply_chat_template().
+    The few-shot example is the primary defence against "LLM laziness" — the model
+    tendency to stop after the first matching row. Showing an explicit example of a
+    parameter with two test conditions (25°C and 70°C) and the correct two-row output
+    teaches the behaviour far more reliably than instructions alone.
+
+    The <THINKING> block is stripped by _filter_reasoning_steps() before the
+    response is returned to the user.
     """
     context = clean_latex_symbols(context)
 
+    # ── Few-shot example (structural — no hardcoded values) ───────────────────
+    # Uses abstract placeholders (<PARAM_A>, <VAL1>, <COND_A>, ...) so the model
+    # learns the multi-row extraction *pattern* without any risk of echoing
+    # pre-loaded numbers into the real answer.
+    few_shot_example = (
+        "### EXAMPLE: HOW TO EXTRACT MULTI-CONDITION PARAMETERS\n"
+        "\n"
+        "[Example Context]\n"
+        "<DATASHEET_TABLE>\n"
+        "| Parameter | Symbol | Conditions | min | typ | max | Unit |\n"
+        "|-----------|--------|------------|-----|-----|-----|------|\n"
+        "| <PARAM_A> | <SYM_A> | <COND_A> | - | - | <VAL1> | <UNIT> |\n"
+        "| <PARAM_A> | <SYM_A> | <COND_B> | - | - | <VAL2> | <UNIT> |\n"
+        "| <PARAM_B> | <SYM_B> | <COND_A> | - | - | <VAL3> | <UNIT> |\n"
+        "| <PARAM_C> | <SYM_C> | <COND_C> | - | - | <VAL4> | <UNIT> |\n"
+        "</DATASHEET_TABLE>\n"
+        "\n"
+        "[Example Query]\n"
+        "Extract <PARAM_A>.\n"
+        "\n"
+        "[Example Thinking]\n"
+        "<THINKING>\n"
+        "1. Target Parameter: <PARAM_A>\n"
+        "2. Rows found:\n"
+        "   - Row 1: <PARAM_A> | <SYM_A> | <COND_A> | - | - | <VAL1> | <UNIT>  ← EXACT MATCH\n"
+        "   - Row 2: <PARAM_A> | <SYM_A> | <COND_B> | - | - | <VAL2> | <UNIT>  ← EXACT MATCH\n"
+        "3. Rejected rows:\n"
+        "   - '<PARAM_B>' — REJECTED: different parameter name\n"
+        "   - '<PARAM_C>' — REJECTED: different parameter name\n"
+        "4. Source columns: Parameter | Symbol | Conditions | min | typ | max | Unit\n"
+        "</THINKING>\n"
+        "\n"
+        "[Correct Output — one row per condition, source columns preserved]\n"
+        "| Parameter | Symbol | Conditions | min | typ | max | Unit |\n"
+        "|-----------|--------|------------|-----|-----|-----|------|\n"
+        "| <PARAM_A> | <SYM_A> | <COND_A> | - | - | <VAL1> | <UNIT> |\n"
+        "| <PARAM_A> | <SYM_A> | <COND_B> | - | - | <VAL2> | <UNIT> |\n"
+        "\n"
+        "[Wrong Output — DO NOT do this]\n"
+        "| Parameter | Symbol | Value | Unit |\n"
+        "|-----------|--------|-------|------|\n"
+        "| <PARAM_A> | <SYM_A> | <VAL1> | <UNIT> |\n"
+        "WRONG because: (a) the <COND_B> row is dropped, "
+        "(b) min/typ/max are compressed into a fabricated 'Value' column.\n"
+    )
+
+    # ── Real context + user query ─────────────────────────────────────────────
     user_content = (
-        "### DATASHEET CONTEXT\n"
-        "The following tables are from a semiconductor datasheet. "
-        "Each table is wrapped in <DATASHEET_TABLE> tags with its exact column headers.\n\n"
-        f"{context}\n\n"
-        "### USER QUERY\n"
-        f"{query}\n\n"
-        "### YOUR PROTOCOL\n"
-        "Step 1 — Open a <THINKING> block and complete all 4 items:\n"
-        "  1. Target Parameter: write the exact parameter name from the query.\n"
-        "  2. Rows found: list ONLY rows whose Parameter cell is a character-for-character "
-        "match of the target (e.g. exact string 'Drain-source leakage current').\n"
-        "  3. Rejected rows: list every row you discard and the reason "
-        "(e.g. 'Gate-source leakage current' — REJECTED: different parameter).\n"
-        "  4. Source columns: copy the exact column headers from the <DATASHEET_TABLE> tag.\n"
-        "Step 2 — Close </THINKING>.\n"
-        "Step 3 — Output ONLY a Markdown table containing the rows confirmed in Step 1.\n"
-        "  - Use the exact source column headers (from Step 4 of your thinking).\n"
-        "  - DO NOT compress min/typ/max into a single Value column.\n"
-        "  - One test condition = one row. Never merge conditions.\n"
-        "  - No prose before or after the table.\n"
+        few_shot_example
+        + "\n"
+        + "─" * 60 + "\n"
+        + "### NOW DO THE SAME FOR THE REAL DATASHEET\n\n"
+        + "### DATASHEET CONTEXT\n"
+        + "The following tables are from a real semiconductor datasheet. "
+        + "Each table is wrapped in <DATASHEET_TABLE> tags with its exact column headers.\n\n"
+        + f"{context}\n\n"
+        + "### USER QUERY\n"
+        + f"{query}\n\n"
+        + "### YOUR PROTOCOL\n"
+        + "Step 1 — Open a <THINKING> block and complete all 4 items:\n"
+        + "  1. Target Parameter: write the exact parameter name from the query.\n"
+        + "  2. Rows found: list ONLY rows whose Parameter cell is a character-for-character "
+        + "match of the target.\n"
+        + "  3. Rejected rows: list every row you discard and WHY "
+        + "(e.g. 'Gate-source leakage current' — REJECTED: different parameter).\n"
+        + "  4. Source columns: copy the exact column headers from the <DATASHEET_TABLE> tag.\n"
+        + "Step 2 — Close </THINKING>.\n"
+        + "Step 3 — Output ONLY a Markdown table containing the confirmed rows.\n"
+        + "  - Use the EXACT source column headers (from Step 4 of your thinking).\n"
+        + "  - DO NOT compress min/typ/max into a single Value column.\n"
+        + "  - One test condition = one row. Never merge conditions.\n"
+        + "  - No prose before or after the table.\n"
     )
     return [
         {"role": "system", "content": _SYSTEM_PROMPT},
