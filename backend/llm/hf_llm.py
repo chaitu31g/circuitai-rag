@@ -3,9 +3,9 @@ backend/llm/hf_llm.py
 ─────────────────────
 HuggingFace Transformers LLM module for CircuitAI RAG.
 
-Primary reasoning model: Qwen/Qwen3.5-4B
-  • Stronger reasoning than Qwen2.5-3B for electronics Q&A
-  • Fits on a T4 (16 GB VRAM) with 4-bit NF4 quantisation
+Primary reasoning model: Qwen/Qwen2.5-3B-Instruct
+  • Standard reasoning for electronics Q&A
+  • Highly compatible with stable transformers (< 4.50.0)
   • Device: auto-selected by device_map="auto"
 
 This module is a thin re-export shim that delegates to the canonical
@@ -18,7 +18,7 @@ so switching models never requires prompt format changes.
 
 from __future__ import annotations
 
-# Re-export the canonical Qwen3.5-4B implementation so existing imports
+# Re-export the canonical Qwen implementation so existing imports
 # from backend.llm.hf_llm continue to work without changes.
 from rag_pipeline.models.qwen_llm import (  # noqa: F401
     MODEL_NAME as DEFAULT_MODEL,

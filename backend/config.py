@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     # Alternatives:
     #   Qwen/Qwen2.5-3B-Instruct   (faster, slightly lower quality)
     #   mistralai/Mistral-7B-Instruct-v0.2  (slower, also good)
-    hf_model: str = "Qwen/Qwen3.5-4B"
+    hf_model: str = "Qwen/Qwen2.5-3B-Instruct"
 
     # Embedding & reranker
     embedding_model: str = "BAAI/bge-m3"

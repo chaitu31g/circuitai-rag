@@ -1,14 +1,14 @@
 """
 rag_pipeline/models/qwen_llm.py
 ────────────────────────────────────────────────────────────────────────────
-Qwen3.5-4B primary reasoning module for CircuitAI RAG.
+Qwen2.5-3B-Instruct primary reasoning module for CircuitAI RAG.
 
 This is the canonical LLM service used for answering datasheet questions.
 It wraps the same singleton + thread-safe loading pattern used throughout
 the codebase, and exposes a simple generate_response() function that the
 backend chat endpoints can call directly.
 
-Model   : Qwen/Qwen3.5-4B  (instruction-tuned, supports chat template)
+Model   : Qwen/Qwen2.5-3B-Instruct  (instruction-tuned, supports chat template)
 Quant   : 4-bit NF4 via bitsandbytes  — fits comfortably on a T4 (16 GB)
 Device  : device_map="auto"  (GPU if available, CPU fallback)
 
@@ -121,7 +121,7 @@ def clean_latex_symbols(text: str) -> str:
     return text
 
 # ── Model identifier ───────────────────────────────────────────────────────────
-MODEL_NAME = os.environ.get("HF_MODEL", "Qwen/Qwen3.5-4B")
+MODEL_NAME = os.environ.get("HF_MODEL", "Qwen/Qwen2.5-3B-Instruct")
 
 # ── Module-level singletons ────────────────────────────────────────────────────
 _tokenizer = None
@@ -158,7 +158,7 @@ _REASONING_PATTERNS = (
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _load_model(model_id: str = MODEL_NAME) -> None:
-    """Load tokenizer + 4-bit quantised Qwen3.5-4B into module globals (once)."""
+    """Load tokenizer + 4-bit quantised Qwen into module globals (once)."""
     global _tokenizer, _model
 
     with _load_lock:
@@ -174,7 +174,7 @@ def _load_model(model_id: str = MODEL_NAME) -> None:
                 "  pip install transformers accelerate bitsandbytes sentencepiece safetensors"
             ) from exc
 
-        logger.info("Loading Qwen3.5-4B: %s …", model_id)
+        logger.info("Loading Qwen: %s …", model_id)
 
         bnb_config = BitsAndBytesConfig(
             load_in_4bit=True,
@@ -196,7 +196,7 @@ def _load_model(model_id: str = MODEL_NAME) -> None:
             torch_dtype="auto",
         )
         _model.eval()
-        logger.info("Qwen3.5-4B loaded ✓  (model=%s, device_map=auto)", model_id)
+        logger.info("Qwen loaded ✓  (model=%s, device_map=auto)", model_id)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -275,18 +275,18 @@ def build_synthesis_prompt(section_context: str, query: str) -> list[dict]:
 def _apply_template(messages: list[dict]) -> str:
     """Convert chat messages → model-specific prompt string via the tokenizer.
 
-    Passes ``enable_thinking=False`` so Qwen3-series models suppress their
-    built-in chain-of-thought / thinking mode and output the answer directly.
+    Passes ``enable_thinking=False`` if supported so reasoning models suppress their 
+    built-in chain-of-thought blocks and output the answer directly.
     """
     if _tokenizer is None:
         raise RuntimeError("Model is not loaded yet.")
     try:
-        # Qwen3 tokenizers support enable_thinking to disable <think> blocks.
+        # Some tokenizers support enable_thinking to disable <think> blocks.
         return _tokenizer.apply_chat_template(
             messages,
             tokenize=False,
             add_generation_prompt=True,
-            enable_thinking=False,    # ← disables Qwen3 thinking/reasoning mode
+            enable_thinking=False,    # ← disables thinking/reasoning mode if present
         )
     except TypeError:
         # Older tokenizer versions don't have enable_thinking — fall back gracefully.
@@ -300,14 +300,14 @@ def _apply_template(messages: list[dict]) -> str:
 def _filter_reasoning_steps(text: str) -> str:
     """Remove chain-of-thought / thinking blocks from model output.
 
-    Qwen3-series models may emit <think>...</think> XML blocks even when
+    Some models may emit <think>...</think> XML blocks even when
     prompted not to. This function strips them as a safety net, along with
     other common reasoning-step heading patterns.
     """
     import re
 
-    # ── Priority 1: strip Qwen3 <think>...</think> blocks ─────────────────────
-    # These are emitted by the model's internal reasoning mode.
+    # ── Priority 1: strip <think>...</think> blocks ─────────────────────
+    # These are emitted by some model's internal reasoning mode.
     text = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE).strip()
 
     # ── Priority 2: legacy "Thinking Process" / "Draft N:" pattern ────────────
