@@ -132,29 +132,32 @@ _load_lock = threading.Lock()
 _SYSTEM_PROMPT = (
     "### ROLE\n"
     "You are a High-Precision Power Electronics Engineer. "
-    "Your ONLY job is to extract exact technical specifications from semiconductor datasheets "
-    "exactly as they appear — no interpretation, no paraphrasing, no omissions.\n\n"
+    "Your ONLY job is to extract exact technical specifications from semiconductor "
+    "datasheets exactly as they appear — no interpretation, no paraphrasing, no omissions.\n\n"
 
-    "### MANDATORY EXTRACTION PROTOCOL\n"
-    "1. SCAN ALL ROWS: Read EVERY row in the provided context before answering. "
-    "Do NOT stop at the first matching row.\n"
-    "2. CAPTURE ALL CONDITIONS: A parameter (e.g. RDS(on), ID, VGS(th)) may have MULTIPLE rows "
-    "for different test conditions (e.g. T=25°C vs T=70°C, VGS=4.5V vs VGS=10V). "
-    "You MUST include EVERY such row.\n"
-    "3. NEVER COLLAPSE: It is FORBIDDEN to merge multiple rows into a single 'typical' value. "
-    "If 3 rows exist for a parameter, output all 3 rows.\n"
-    "4. ALWAYS INCLUDE: The 'Test Conditions' column (VGS, ID, Tj, etc.) and Units (V, A, Ω, µA).\n"
-    "5. OUTPUT FORMAT: When the answer involves tabular data, format your response "
-    "as a Markdown table:\n"
-    "   | Parameter | Symbol | Min | Typ | Max | Unit | Conditions |\n"
-    "   |-----------|--------|-----|-----|-----|------|------------|\n\n"
+    "### RULE 1 — FORMAT CONSISTENCY (CRITICAL)\n"
+    "The context contains tables wrapped in <DATASHEET_TABLE> tags. "
+    "You MUST use the EXACT column headers found inside those tags. "
+    "DO NOT invent or force columns like 'Min', 'Typ', or 'Max' unless they "
+    "actually exist verbatim in the source table. "
+    "If the source table has columns 'Parameter | Symbol | Conditions | Value | Unit', "
+    "your output MUST use exactly those columns.\n\n"
+
+    "### RULE 2 — EXHAUSTIVE EXTRACTION (CRITICAL)\n"
+    "When a parameter is requested, you MUST output EVERY ROW associated with it. "
+    "If there are multiple test conditions (e.g. T_A=25°C and T_A=70°C, "
+    "or VGS=4.5V and VGS=10V), you MUST generate a SEPARATE ROW for each. "
+    "DO NOT summarize. DO NOT stop after the first value. "
+    "Merging multiple condition rows into one is FORBIDDEN.\n\n"
+
+    "### RULE 3 — OUTPUT FORMAT\n"
+    "Your entire response MUST be a Markdown table using the exact column headers "
+    "from the <DATASHEET_TABLE> context. No prose before or after the table.\n\n"
 
     "### STRICT PROHIBITIONS\n"
-    "- DO NOT summarize or generalize multiple rows into one line.\n"
-    "- DO NOT say 'typical value is X' when the datasheet provides per-condition entries.\n"
-    "- DO NOT omit rows due to repeated parameter names — those are separate test conditions.\n"
-    "- If data is absent from context, state: "
-    "'Data not available in current context.' Do NOT fabricate values.\n"
+    "- DO NOT fabricate values. If data is absent, state 'N/A'.\n"
+    "- DO NOT omit rows because a parameter name repeats — those are different conditions.\n"
+    "- DO NOT add columns that do not exist in the source table.\n"
 )
 
 # Reasoning-step patterns to strip from model output.
@@ -224,24 +227,35 @@ def load_model_once(model_id: str = MODEL_NAME) -> None:
 def build_prompt(context: str, query: str) -> list[dict]:
     """Build the chat messages list for a detailed RAG query.
 
-    Returns a list of message dicts ({'role': ..., 'content': ...}) which are
-    passed to the tokenizer's apply_chat_template(). This approach works
-    correctly for Qwen3.5 and any other instruction-tuned model without
-    manual prompt format management.
+    The context is expected to contain one or more <DATASHEET_TABLE>...</DATASHEET_TABLE>
+    blocks produced by parameter_extractor.py.  The user message explicitly
+    instructs the model to use only the column headers found inside those tags,
+    preventing hallucination of columns like 'Min/Typ/Max' that may not exist
+    in the source table.
+
+    Returns a list of message dicts for apply_chat_template().
     """
-    # Clean LaTeX from retrieved context before it enters the prompt so the
-    # model never sees raw math notation and is less likely to reproduce it.
     context = clean_latex_symbols(context)
 
     user_content = (
-        f"### CONTEXT:\n{context}\n\n"
-        f"### USER QUERY:\n{query}\n\n"
-        "### FINAL OUTPUT:\n"
-        "(Provide the result as a detailed Markdown table following the datasheet's layout)"
+        "### DATASHEET CONTEXT\n"
+        "The following context contains tables from a semiconductor datasheet.\n"
+        "Tables are wrapped in <DATASHEET_TABLE> tags.\n"
+        "You MUST use ONLY the column names that appear inside those tags.\n\n"
+        f"{context}\n\n"
+        "### USER QUERY\n"
+        f"{query}\n\n"
+        "### MANDATORY INSTRUCTIONS\n"
+        "1. Find ALL rows in the <DATASHEET_TABLE> blocks that match the query.\n"
+        "2. Output EVERY matching row as a separate row in your Markdown table.\n"
+        "   Multiple test conditions (25°C, 70°C, VGS=4.5V, VGS=10V) = multiple rows.\n"
+        "3. Use the EXACT column headers from the <DATASHEET_TABLE> source.\n"
+        "   DO NOT add Min/Typ/Max unless those exact words appear in the source.\n"
+        "4. Output ONLY the Markdown table. No prose, no explanation.\n"
     )
     return [
-        {"role": "system",  "content": _SYSTEM_PROMPT},
-        {"role": "user",    "content": user_content},
+        {"role": "system", "content": _SYSTEM_PROMPT},
+        {"role": "user",   "content": user_content},
     ]
 
 
