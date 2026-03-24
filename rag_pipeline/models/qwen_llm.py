@@ -403,13 +403,97 @@ def _apply_template(messages: list[dict]) -> str:
         )
 
 
+def json_to_markdown(json_string: str) -> str:
+    """Convert a JSON array of objects to a Markdown pipe-table.
+
+    This is both a public utility (for use by scripts / tests) and a recovery
+    mechanism: if the LLM emits JSON instead of a Markdown table, this function
+    transparently converts it before the response reaches the frontend.
+
+    The column headers are derived DYNAMICALLY from the keys of the first object,
+    so this works for any parameter in any datasheet — no hardcoded columns.
+
+    Parameters
+    ----------
+    json_string:
+        A string containing a JSON array of flat objects, e.g.::
+
+            [
+              {"Parameter": "ID", "Conditions": "T=25C", "max": "0.23", "Unit": "A"},
+              {"Parameter": "ID", "Conditions": "T=70C", "max": "0.18", "Unit": "A"}
+            ]
+
+    Returns
+    -------
+    str
+        A GFM Markdown table if parsing succeeds, otherwise the original string.
+    """
+    import json as _json
+    import re as _re
+
+    # ── Step 1: extract the JSON array from the string ────────────────────────
+    # The model may wrap the JSON in prose or code fences; extract the array.
+    text = json_string.strip()
+
+    # Strip ```json ... ``` or ``` ... ``` fences if present
+    fence_match = _re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+    if fence_match:
+        text = fence_match.group(1).strip()
+
+    # Find the first [ ... ] block
+    bracket_match = _re.search(r"(\[\s*\{[\s\S]*\}\s*\])", text)
+    if bracket_match:
+        text = bracket_match.group(1)
+
+    # ── Step 2: parse ─────────────────────────────────────────────────────────
+    try:
+        data = _json.loads(text)
+    except (_json.JSONDecodeError, ValueError):
+        # Not valid JSON — return original string unchanged
+        return json_string
+
+    if not isinstance(data, list) or not data:
+        return json_string
+
+    # Ensure all items are dicts
+    rows = [item for item in data if isinstance(item, dict)]
+    if not rows:
+        return json_string
+
+    # ── Step 3: derive headers from the union of all keys ────────────────────
+    # Preserve insertion order from the first object, then add any extra keys
+    # from subsequent objects (handles inconsistent key sets gracefully).
+    seen: dict[str, None] = {}
+    for row in rows:
+        for key in row:
+            seen[key] = None
+    headers = list(seen)
+
+    # ── Step 4: build Markdown table ─────────────────────────────────────────
+    sep = ["---"] * len(headers)
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join(sep)     + " |",
+    ]
+    for row in rows:
+        cells = [str(row.get(h, "")).replace("|", "\\|") for h in headers]
+        lines.append("| " + " | ".join(cells) + " |")
+
+    logger.debug(
+        "json_to_markdown: converted %d-row JSON array → Markdown table (cols=%s)",
+        len(rows), headers,
+    )
+    return "\n".join(lines)
+
+
 def _filter_reasoning_steps(text: str) -> str:
     """Strip all CoT / thinking blocks from model output before returning to user.
 
-    Handles three kinds of reasoning block:
+    Handles four kinds of reasoning block / output format:
       1. Our own <THINKING>...</THINKING> (Chain-of-Thought protocol)
       2. Qwen's native <think>...</think> internal reasoning mode
       3. Legacy heading-based reasoning patterns ("Thinking Process:", "Step 1:", ...)
+      4. JSON array output — converted to Markdown via json_to_markdown()
     """
     import re
 
@@ -454,9 +538,17 @@ def _filter_reasoning_steps(text: str) -> str:
     cleaned = meta_re.sub("", cleaned)
 
     # Collapse multiple blank lines.
-    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
-    return cleaned.strip()
+    # ── Priority 5: JSON → Markdown conversion ────────────────────────────────
+    # If the model emitted a JSON array (intentionally or by mistake), convert
+    # it to a Markdown pipe-table that the React frontend can render directly.
+    # json_to_markdown() returns the original string unchanged on parse failure
+    # so this is always safe to call.
+    if cleaned.lstrip().startswith("[") or "```json" in cleaned or "```\n[" in cleaned:
+        cleaned = json_to_markdown(cleaned)
+
+    return cleaned
 
 
 def generate_response(
