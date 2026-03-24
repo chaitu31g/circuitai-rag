@@ -42,39 +42,111 @@ function loadMessagesFromStorage() {
   }
 }
 
-// ── Minimal markdown renderer ─────────────────────────────────────────────────
+// ── Markdown renderer with pipe-table support ─────────────────────────────────
 function MarkdownContent({ text = '', isStreaming = false }) {
   const lines = text.split('\n');
+
+  // Segment lines into plain-text blocks and contiguous table blocks
+  const blocks = [];
+  let i = 0;
+  while (i < lines.length) {
+    if (lines[i].trimStart().startsWith('|')) {
+      const tableLines = [];
+      while (i < lines.length && lines[i].trimStart().startsWith('|')) {
+        tableLines.push(lines[i]);
+        i++;
+      }
+      blocks.push({ type: 'table', lines: tableLines });
+    } else {
+      blocks.push({ type: 'line', content: lines[i] });
+      i++;
+    }
+  }
+
+  // Parse | header | ... | sep | ... | rows into arrays
+  function parseTable(tableLines) {
+    const parseRow = (line) =>
+      line.split('|').slice(1, -1).map((c) => c.trim());
+    const header = parseRow(tableLines[0]);
+    // skip the divider row (|---|---|...)
+    const rows = tableLines.slice(2).map(parseRow);
+    return { header, rows };
+  }
+
+  // Render inline markdown: **bold**, *italic*, `code`
+  function renderInline(str, key) {
+    const parts = str.split(/(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)/g);
+    return (
+      <span key={key}>
+        {parts.map((part, j) => {
+          if (part.startsWith('**') && part.endsWith('**'))
+            return <strong key={j} className="text-slate-100 font-semibold">{part.slice(2, -2)}</strong>;
+          if (part.startsWith('*') && part.endsWith('*'))
+            return <em key={j} className="text-slate-400 italic">{part.slice(1, -1)}</em>;
+          if (part.startsWith('`') && part.endsWith('`'))
+            return <code key={j} className="bg-slate-700/60 text-cyan-300 px-1 rounded text-xs font-mono">{part.slice(1, -1)}</code>;
+          return <span key={j}>{part}</span>;
+        })}
+      </span>
+    );
+  }
+
+  const lastIdx = blocks.length - 1;
   return (
     <div className="text-sm leading-relaxed space-y-1.5">
-      {lines.map((line, i) => {
-        if (line === '---')
-          return <div key={i} className="h-px bg-slate-700/60 my-2" />;
-        if (line.startsWith('### '))
-          return <h3 key={i} className="text-slate-200 font-semibold text-xs uppercase tracking-wide text-indigo-300 mt-3">{line.slice(4)}</h3>;
-        if (line.startsWith('## '))
-          return <h2 key={i} className="text-slate-100 font-bold text-sm mt-3">{line.slice(3)}</h2>;
-        if (line === '```')
-          return null;
-        if (line.startsWith('```'))
-          return null;
-        if (!line.trim())
-          return <div key={i} className="h-1" />;
+      {blocks.map((block, bi) => {
+        // ── Table block ────────────────────────────────────────────────────
+        if (block.type === 'table') {
+          const { header, rows } = parseTable(block.lines);
+          return (
+            <div key={bi} className="overflow-x-auto my-3 rounded-lg border border-slate-600/50">
+              <table className="min-w-full text-xs border-collapse">
+                <thead>
+                  <tr className="bg-slate-700/70">
+                    {header.map((h, hi) => (
+                      <th
+                        key={hi}
+                        className="px-3 py-2 text-left font-semibold text-indigo-300 border-b border-slate-600/60 whitespace-nowrap"
+                      >
+                        {renderInline(h, hi)}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((row, ri) => (
+                    <tr key={ri} className={ri % 2 === 0 ? 'bg-slate-800/40' : 'bg-slate-800/20'}>
+                      {row.map((cell, ci) => (
+                        <td
+                          key={ci}
+                          className="px-3 py-1.5 text-slate-300 border-b border-slate-700/30 whitespace-nowrap font-mono"
+                        >
+                          {renderInline(cell, ci)}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          );
+        }
 
-        // Inline bold **text** and *italic*
-        const parts = line.split(/(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)/g);
+        // ── Plain line block ───────────────────────────────────────────────
+        const line = block.content;
+        const isLast = bi === lastIdx;
+        if (line === '---') return <div key={bi} className="h-px bg-slate-700/60 my-2" />;
+        if (line.startsWith('### '))
+          return <h3 key={bi} className="text-slate-200 font-semibold text-xs uppercase tracking-wide text-indigo-300 mt-3">{line.slice(4)}</h3>;
+        if (line.startsWith('## '))
+          return <h2 key={bi} className="text-slate-100 font-bold text-sm mt-3">{line.slice(3)}</h2>;
+        if (line === '```' || line.startsWith('```')) return null;
+        if (!line.trim()) return <div key={bi} className="h-1" />;
+
         return (
-          <p key={i} className="text-slate-300">
-            {parts.map((part, j) => {
-              if (part.startsWith('**') && part.endsWith('**'))
-                return <strong key={j} className="text-slate-100 font-semibold">{part.slice(2, -2)}</strong>;
-              if (part.startsWith('*') && part.endsWith('*'))
-                return <em key={j} className="text-slate-400 italic">{part.slice(1, -1)}</em>;
-              if (part.startsWith('`') && part.endsWith('`'))
-                return <code key={j} className="bg-slate-700/60 text-cyan-300 px-1 rounded text-xs font-mono">{part.slice(1, -1)}</code>;
-              return <span key={j}>{part}</span>;
-            })}
-            {isStreaming && i === lines.length - 1 && (
+          <p key={bi} className="text-slate-300">
+            {renderInline(line, bi)}
+            {isStreaming && isLast && (
               <span className="inline-block w-0.5 h-3.5 bg-indigo-400 animate-pulse ml-0.5 align-middle" />
             )}
           </p>
@@ -210,7 +282,6 @@ function ComponentDropdown({ components, value, onChange }) {
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
 
-  // Close on outside click
   useEffect(() => {
     const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
     document.addEventListener('mousedown', handler);
@@ -223,7 +294,6 @@ function ComponentDropdown({ components, value, onChange }) {
 
   return (
     <div ref={ref} className="relative">
-      {/* Trigger button */}
       <button
         onClick={() => setOpen(v => !v)}
         className="flex items-center gap-2 bg-slate-800 border border-slate-600/60 hover:border-indigo-500/50 text-slate-200 text-xs rounded-lg px-3 py-2 font-mono transition-all min-w-[160px] max-w-[200px] focus:outline-none focus:ring-1 focus:ring-indigo-500/40"
@@ -232,10 +302,8 @@ function ComponentDropdown({ components, value, onChange }) {
         <ChevronDown className={`w-3.5 h-3.5 text-slate-400 flex-shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
       </button>
 
-      {/* Dropdown list */}
       {open && (
         <div className="absolute right-0 top-full mt-1 z-50 w-56 bg-slate-800 border border-slate-600/60 rounded-xl shadow-xl shadow-black/40 overflow-hidden">
-          {/* All components option */}
           <button
             onClick={() => { onChange(''); setOpen(false); }}
             className={`w-full text-left px-3 py-2.5 text-xs font-mono transition-colors flex items-center gap-2
@@ -247,10 +315,8 @@ function ComponentDropdown({ components, value, onChange }) {
             All components
           </button>
 
-          {/* Divider */}
           <div className="h-px bg-slate-700/60 mx-2" />
 
-          {/* Scrollable options — sorted newest first */}
           <div className="max-h-56 overflow-y-auto">
             {[...components]
               .sort((a, b) => (b.ingested_at || '').localeCompare(a.ingested_at || ''))
@@ -289,24 +355,18 @@ export default function ChatPanel({ components = [] }) {
 
   useEffect(() => () => clearInterval(elapsedRef.current), []);
 
-  // Auto-scroll only the chat container
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [messages]);
 
-  // Persist chat history so tab/mode switches do not reset conversation
   useEffect(() => {
     if (typeof window === 'undefined') return;
-
     try {
-      window.localStorage.setItem(
-        CHAT_HISTORY_STORAGE_KEY,
-        JSON.stringify(messages)
-      );
+      window.localStorage.setItem(CHAT_HISTORY_STORAGE_KEY, JSON.stringify(messages));
     } catch {
-      // Ignore storage failures (quota/private mode)
+      // Ignore storage failures
     }
   }, [messages]);
 
@@ -314,7 +374,6 @@ export default function ChatPanel({ components = [] }) {
     if (typeof window !== 'undefined') {
       window.localStorage.removeItem(CHAT_HISTORY_STORAGE_KEY);
     }
-
     clearInterval(elapsedRef.current);
     setMessages([DEFAULT_ASSISTANT_MESSAGE]);
     setLoading(false);
@@ -331,10 +390,7 @@ export default function ChatPanel({ components = [] }) {
     setLoading(true);
     setElapsed(0);
 
-    // Placeholder while we wait for first token
     setMessages(prev => [...prev, { role: 'assistant', content: '', loading: true, sources: [] }]);
-
-    // Elapsed counter
     elapsedRef.current = setInterval(() => setElapsed(s => s + 1), 1000);
 
     let fullText = '';
@@ -344,9 +400,7 @@ export default function ChatPanel({ components = [] }) {
     try {
       const response = await fetch(`${API_BASE_URL}/chat/stream`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           query,
           component_filter: componentFilter || null,
@@ -365,13 +419,8 @@ export default function ChatPanel({ components = [] }) {
 
       while (true) {
         const { done, value } = await reader.read();
+        if (value) buffer += decoder.decode(value, { stream: !done });
 
-        // Decode chunk; when done=true flush remaining bytes too
-        if (value) {
-          buffer += decoder.decode(value, { stream: !done });
-        }
-
-        // Process ALL complete lines — even on the final read
         const lines = buffer.split('\n');
         buffer = done ? '' : (lines.pop() ?? '');
 
@@ -398,13 +447,9 @@ export default function ChatPanel({ components = [] }) {
               });
             }
 
-            if (evt.type === 'mode' && evt.mode === 'direct') {
-              isDirectMode = true;
-            }
+            if (evt.type === 'mode' && evt.mode === 'direct') isDirectMode = true;
 
-            if (evt.type === 'error') {
-              fullText = fullText || `❌ ${evt.message}`;
-            }
+            if (evt.type === 'error') fullText = fullText || `❌ ${evt.message}`;
 
             if (evt.type === 'done') {
               setMessages(prev => {
@@ -426,11 +471,10 @@ export default function ChatPanel({ components = [] }) {
       }
     } catch (err) {
       const errMsg = err.message || 'Request failed';
-      // If we already received sources, show a structured fallback instead of raw error
       const fallbackMsg = receivedSources.length > 0
         ? `**📋 Datasheet Results for:** *${query}*\n\n` +
           `*LLM is unavailable, but here are the relevant datasheet sources:*\n\n` +
-          receivedSources.map((s, i) => {
+          receivedSources.map((s) => {
             const comp = (s.component || 'unknown').replace(/_/g, ' ');
             const section = (s.section || '').replace(/_/g, ' ');
             return `### 📄 ${comp}\n*Section: ${section}*\n${s.text || ''}\n*Score: ${s.score}*\n`;
@@ -485,7 +529,6 @@ export default function ChatPanel({ components = [] }) {
           </div>
         </div>
 
-        {/* Component filter — custom dark dropdown */}
         <div className="flex items-center gap-2">
           {components.length > 0 && (
             <ComponentDropdown
@@ -498,7 +541,7 @@ export default function ChatPanel({ components = [] }) {
             type="button"
             onClick={clearChat}
             disabled={loading}
-            className="flex items-center gap-1.5 bg-slate-800 border border-slate-600/60 hover:border-red-500/60 text-slate-300 hover:text-red-300 text-xs rounded-lg px-3 py-2 transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:border-slate-600/60 disabled:hover:text-slate-300"
+            className="flex items-center gap-1.5 bg-slate-800 border border-slate-600/60 hover:border-red-500/60 text-slate-300 hover:text-red-300 text-xs rounded-lg px-3 py-2 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
             title="Clear chat history"
           >
             <Trash2 className="w-3.5 h-3.5" />

@@ -5,10 +5,45 @@ from ingestion.datasheet_chunker import Chunk
 
 logger = logging.getLogger(__name__)
 
+
+def _ffill_merged_cells(rows: list[list[str]]) -> list[list[str]]:
+    """Forward-fill the first two columns (Parameter name + Symbol) to fix
+    merged-cell data loss.
+
+    Datasheets use merged cells for parameters with multiple test conditions,
+    e.g. "Continuous drain current" spans rows for 25°C and 70°C, but the
+    second row's parameter cell is blank in the parsed PDF.
+
+    Equivalent to:  df.iloc[:, :2].ffill(axis=0)
+    """
+    try:
+        import pandas as pd
+        import numpy as np
+
+        if not rows:
+            return rows
+
+        df = pd.DataFrame(rows)
+        # Replace empty strings with NaN so ffill works correctly
+        df.iloc[:, :2] = df.iloc[:, :2].replace("", np.nan)
+        df.iloc[:, :2] = df.iloc[:, :2].ffill(axis=0)
+        # Convert NaN back to empty strings for downstream logic
+        df = df.fillna("")
+        return df.values.tolist()
+    except ImportError:
+        # pandas/numpy not available — skip ffill silently
+        logger.warning("pandas not available; skipping merged-cell forward-fill.")
+        return rows
+
+
 def extract_parameter_rows(table: dict, section_name: str, part_number: str, table_number: int, table_title: str = "") -> List[Chunk]:
     """
     Extracts structured parameter records from a table.
-    Addresses issues where the first row is merged with headers or skipped.
+
+    Key fix: applies ffill to the first two columns (Parameter, Symbol) before
+    processing rows, so condition rows belonging to merged-cell parameters are
+    not silently dropped due to a blank parameter name.
+
     Includes table_title and section context in every row-level chunk.
     """
     cells = table.get("data", {}).get("table_cells", [])
@@ -92,6 +127,16 @@ def extract_parameter_rows(table: dict, section_name: str, part_number: str, tab
 
     page = (table.get("prov") or [{}])[0].get("page_no")
     chunks: List[Chunk] = []
+
+    # ── KEY FIX: Forward-fill merged parameter-name cells ─────────────────────
+    # Many datasheet tables use vertically merged cells for parameters that have
+    # multiple test conditions (e.g. 25°C and 70°C rows for the same parameter).
+    # Docling parses the second+ rows with a blank first column, so without ffill
+    # those rows would be silently dropped by the `not any(cell)` guard below.
+    # We only ffill the first two columns (Parameter name + Symbol).
+    print(f"[DEBUG ffill] rows_to_process before ffill: {len(rows_to_process)} rows")
+    rows_to_process = _ffill_merged_cells(rows_to_process)
+    print(f"[DEBUG ffill] rows_to_process after  ffill: {len(rows_to_process)} rows")
 
     # Process all identified data rows
     for row in rows_to_process:
