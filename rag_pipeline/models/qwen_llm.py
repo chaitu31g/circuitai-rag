@@ -131,33 +131,50 @@ _load_lock = threading.Lock()
 # System prompt injected via the chat template for every query.
 _SYSTEM_PROMPT = (
     "### ROLE\n"
-    "You are a High-Precision Power Electronics Engineer. "
+    "You are a High-Precision Power Electronics Engineer and a meticulous data extractor. "
     "Your ONLY job is to extract exact technical specifications from semiconductor "
-    "datasheets exactly as they appear — no interpretation, no paraphrasing, no omissions.\n\n"
+    "datasheets exactly as they appear — zero interpretation, zero paraphrasing, zero omissions.\n\n"
 
-    "### RULE 1 — FORMAT CONSISTENCY (CRITICAL)\n"
-    "The context contains tables wrapped in <DATASHEET_TABLE> tags. "
-    "You MUST use the EXACT column headers found inside those tags. "
-    "DO NOT invent or force columns like 'Min', 'Typ', or 'Max' unless they "
-    "actually exist verbatim in the source table. "
-    "If the source table has columns 'Parameter | Symbol | Conditions | Value | Unit', "
-    "your output MUST use exactly those columns.\n\n"
+    "### MANDATORY THINKING PHASE (Chain-of-Thought)\n"
+    "Before producing any output, you MUST reason inside a <THINKING> block like this:\n"
+    "<THINKING>\n"
+    "1. Target Parameter: [Copy the EXACT parameter name from the user query]\n"
+    "2. Rows found: [List every row in the context where the Parameter column is an "
+    "EXACT character-for-character match of the target]\n"
+    "3. Rejected rows: [List every row you are discarding and WHY — e.g., "
+    "'Gate-source leakage current' — REJECTED: contains 'Gate-source', not 'Drain-source']\n"
+    "4. Columns in source: [List the exact column headers from the <DATASHEET_TABLE> tag]\n"
+    "</THINKING>\n"
+    "This thinking block is mandatory. Do not skip it.\n\n"
 
-    "### RULE 2 — EXHAUSTIVE EXTRACTION (CRITICAL)\n"
-    "When a parameter is requested, you MUST output EVERY ROW associated with it. "
-    "If there are multiple test conditions (e.g. T_A=25°C and T_A=70°C, "
-    "or VGS=4.5V and VGS=10V), you MUST generate a SEPARATE ROW for each. "
-    "DO NOT summarize. DO NOT stop after the first value. "
-    "Merging multiple condition rows into one is FORBIDDEN.\n\n"
+    "### RULE 1 — EXACT-MATCH ONLY (NO FUZZY MATCHING)\n"
+    "A row matches the query ONLY if the Parameter cell is a character-for-character "
+    "match of the target name. "
+    "'Gate-source leakage current' is NOT 'Drain-source leakage current'. "
+    "'Gate threshold voltage' is NOT 'Drain threshold voltage'. "
+    "Partial word matches are FORBIDDEN.\n\n"
 
-    "### RULE 3 — OUTPUT FORMAT\n"
-    "Your entire response MUST be a Markdown table using the exact column headers "
-    "from the <DATASHEET_TABLE> context. No prose before or after the table.\n\n"
+    "### RULE 2 — COLUMN FIDELITY (NO COMPRESSION)\n"
+    "You MUST preserve the exact numerical columns from the source table. "
+    "If the source has 'min', 'typ', 'max' columns, output ALL THREE as separate columns. "
+    "DO NOT compress them into a single 'Value' column. "
+    "If a cell is blank or a dash (-), preserve it as-is.\n\n"
+
+    "### RULE 3 — EXHAUSTIVE EXTRACTION\n"
+    "After confirming exact matches in the <THINKING> block, output EVERY confirmed row. "
+    "Multiple test conditions (T=25°C, T=150°C, VGS=4.5V, VGS=10V) = multiple table rows. "
+    "Merging condition rows is FORBIDDEN.\n\n"
+
+    "### RULE 4 — OUTPUT FORMAT\n"
+    "After the </THINKING> block, output ONLY a Markdown table. "
+    "Use the EXACT column headers from the <DATASHEET_TABLE> context. "
+    "No prose, no explanation, no summary before or after the table.\n\n"
 
     "### STRICT PROHIBITIONS\n"
-    "- DO NOT fabricate values. If data is absent, state 'N/A'.\n"
-    "- DO NOT omit rows because a parameter name repeats — those are different conditions.\n"
-    "- DO NOT add columns that do not exist in the source table.\n"
+    "- DO NOT output rows whose Parameter does not exactly match the target.\n"
+    "- DO NOT collapse min/typ/max into one 'Value' column.\n"
+    "- DO NOT fabricate values. If data is absent in the context, write 'N/A'.\n"
+    "- DO NOT add columns that do not exist in the <DATASHEET_TABLE> source.\n"
 )
 
 # Reasoning-step patterns to strip from model output.
@@ -225,13 +242,12 @@ def load_model_once(model_id: str = MODEL_NAME) -> None:
 
 
 def build_prompt(context: str, query: str) -> list[dict]:
-    """Build the chat messages list for a detailed RAG query.
+    """Build the chain-of-thought chat messages list for a RAG query.
 
-    The context is expected to contain one or more <DATASHEET_TABLE>...</DATASHEET_TABLE>
-    blocks produced by parameter_extractor.py.  The user message explicitly
-    instructs the model to use only the column headers found inside those tags,
-    preventing hallucination of columns like 'Min/Typ/Max' that may not exist
-    in the source table.
+    The user message scaffolds the mandatory <THINKING> block so the model
+    reasons through exact-match row selection before emitting the table.
+    The <THINKING> block is stripped by _filter_reasoning_steps() before
+    the response reaches the user.
 
     Returns a list of message dicts for apply_chat_template().
     """
@@ -239,19 +255,25 @@ def build_prompt(context: str, query: str) -> list[dict]:
 
     user_content = (
         "### DATASHEET CONTEXT\n"
-        "The following context contains tables from a semiconductor datasheet.\n"
-        "Tables are wrapped in <DATASHEET_TABLE> tags.\n"
-        "You MUST use ONLY the column names that appear inside those tags.\n\n"
+        "The following tables are from a semiconductor datasheet. "
+        "Each table is wrapped in <DATASHEET_TABLE> tags with its exact column headers.\n\n"
         f"{context}\n\n"
         "### USER QUERY\n"
         f"{query}\n\n"
-        "### MANDATORY INSTRUCTIONS\n"
-        "1. Find ALL rows in the <DATASHEET_TABLE> blocks that match the query.\n"
-        "2. Output EVERY matching row as a separate row in your Markdown table.\n"
-        "   Multiple test conditions (25°C, 70°C, VGS=4.5V, VGS=10V) = multiple rows.\n"
-        "3. Use the EXACT column headers from the <DATASHEET_TABLE> source.\n"
-        "   DO NOT add Min/Typ/Max unless those exact words appear in the source.\n"
-        "4. Output ONLY the Markdown table. No prose, no explanation.\n"
+        "### YOUR PROTOCOL\n"
+        "Step 1 — Open a <THINKING> block and complete all 4 items:\n"
+        "  1. Target Parameter: write the exact parameter name from the query.\n"
+        "  2. Rows found: list ONLY rows whose Parameter cell is a character-for-character "
+        "match of the target (e.g. exact string 'Drain-source leakage current').\n"
+        "  3. Rejected rows: list every row you discard and the reason "
+        "(e.g. 'Gate-source leakage current' — REJECTED: different parameter).\n"
+        "  4. Source columns: copy the exact column headers from the <DATASHEET_TABLE> tag.\n"
+        "Step 2 — Close </THINKING>.\n"
+        "Step 3 — Output ONLY a Markdown table containing the rows confirmed in Step 1.\n"
+        "  - Use the exact source column headers (from Step 4 of your thinking).\n"
+        "  - DO NOT compress min/typ/max into a single Value column.\n"
+        "  - One test condition = one row. Never merge conditions.\n"
+        "  - No prose before or after the table.\n"
     )
     return [
         {"role": "system", "content": _SYSTEM_PROMPT},
@@ -325,25 +347,30 @@ def _apply_template(messages: list[dict]) -> str:
 
 
 def _filter_reasoning_steps(text: str) -> str:
-    """Remove chain-of-thought / thinking blocks from model output.
+    """Strip all CoT / thinking blocks from model output before returning to user.
 
-    Some models may emit <think>...</think> XML blocks even when
-    prompted not to. This function strips them as a safety net, along with
-    other common reasoning-step heading patterns.
+    Handles three kinds of reasoning block:
+      1. Our own <THINKING>...</THINKING> (Chain-of-Thought protocol)
+      2. Qwen's native <think>...</think> internal reasoning mode
+      3. Legacy heading-based reasoning patterns ("Thinking Process:", "Step 1:", ...)
     """
     import re
 
-    # ── Priority 1: strip <think>...</think> blocks ─────────────────────
-    # These are emitted by some model's internal reasoning mode.
+    # ── Priority 1: strip our CoT <THINKING>...</THINKING> blocks ────────────
+    # This is the block the model is explicitly instructed to produce.
+    # Users should never see it — only the final Markdown table.
+    text = re.sub(r"<THINKING>[\s\S]*?</THINKING>", "", text, flags=re.IGNORECASE).strip()
+
+    # ── Priority 2: strip Qwen's native <think>...</think> blocks ────────────
     text = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE).strip()
 
-    # ── Priority 2: legacy "Thinking Process" / "Draft N:" pattern ────────────
+    # ── Priority 3: legacy "Thinking Process:" / "Draft N:" pattern ──────────
     if re.search(r"(?i)thinking process|analyze the request", text):
         match = re.search(r"(?im)(?:draft\s*\d+|final answer|answer):(.*)", text, re.DOTALL)
         if match:
             text = match.group(1).strip()
 
-    # ── Priority 3: remove numbered / bulleted reasoning headers ───────────────
+    # ── Priority 4: remove numbered / bulleted reasoning section headers ──────
     heading_re = re.compile(
         r"(?im)"
         r"^[ \t]*(?:[\*#\-]+[ \t]*)?"      # optional markdown prefix
