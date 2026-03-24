@@ -41,7 +41,7 @@ def main():
         "dataclasses-json", "deprecated", "dirtyjson", "filetype", "tinytag", "typing-inspect",
         "llama-index-workflows", "jsonref", "latex2mathml", "deepsearch-glm", "easyocr",
         "marko", "python-docx", "python-pptx", "jsonlines", "banks", "lxml", "typer>=0.24.0",
-        "pylatexenc", "polyfactory>=2.22.2", "docling-ibm-models>=3.12.0,<4.0.0", "rapidocr>=3.3,<4.0.0",
+        "pylatexenc", "polyfactory>=2.22.2",
         "onnxruntime", "opentelemetry-api==1.38.0", "opentelemetry-sdk==1.38.0",
         "opentelemetry-exporter-otlp-proto-grpc==1.38.0", "opentelemetry-exporter-otlp-proto-http==1.38.0",
         "opentelemetry-exporter-otlp-proto-common==1.38.0", "opentelemetry-proto==1.38.0",
@@ -49,11 +49,15 @@ def main():
         "opentelemetry-instrumentation==0.59b0", "opentelemetry-semantic-conventions==0.59b0", "opentelemetry-util-http==0.59b0"
     ])
 
-    print("\n--- Tier 6: Final Pin (Restore AI Engine Hub Version) ---")
+    print("\n--- Tier 5b: Docling IBM Models (--no-deps to protect transformers 5.x) ---")
+    run_pip(["install", "docling-ibm-models>=3.12.0,<4.0.0", "rapidocr>=3.3,<4.0.0", "--no-deps"])
+
+    print("\n--- Tier 6: Final Pin (Restore AI Engine) ---")
     run_pip([
         "install",
-        "huggingface-hub>=1.7.0",   # Tier 4 docling-ibm-models downgrades this — restore it
-        "setuptools>=80.9.0",        # llama-index-core requires this
+        "transformers>=5.3.0",       # docling-ibm-models 3.x downgrades this — restore it
+        "huggingface-hub>=1.7.0",   # also downgraded — restore
+        "setuptools>=80.9.0",
     ])
 
     print("\n=== All Tiers Installed! Environment is fixed. ===")
