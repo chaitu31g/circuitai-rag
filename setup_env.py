@@ -28,12 +28,10 @@ def main():
     run_pip(["install", "-r", "backend/requirements.txt", "--no-deps"])
 
     # Tier 3
-    print("\n--- Tier 3: Legacy Complainers ---")
-    run_pip(["install", "chromadb==0.5.21", "docling==2.11.0", "--no-deps"])
+    print("\n--- Tier 3: ChromaDB Only (No Dependencies, to bypass tokenizers conflict) ---")
+    run_pip(["install", "chromadb==0.5.21", "--no-deps"])
 
-    # Tier 4
-    print("\n--- Tier 4: Surgical Downgrade for Parser ---")
-    run_pip(["install", "docling-parse>=3.0.0,<4.0.0", "pypdfium2>=4.30.0,<5.0.0", "docling-ibm-models>=2.0.6,<3.0.0"])
+    # Tier 4 removed: newer docling>=2.14 no longer needs docling-ibm-models surgical downgrade
 
     # Tier 5
     print("\n--- Tier 5: Missing Gears (Manual Sub-dependencies) ---")
