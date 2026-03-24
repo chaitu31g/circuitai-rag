@@ -16,7 +16,7 @@ sentence-transformers>=2.7.0
 # ── PDF parsing (Docling) ─────────────────────────────────────────────────────
 docling>=2.14.0              # 2.14+ supports huggingface-hub>=1.x (no more hub downgrade)
 docling-core
-docling-parse
+docling-parse>=5.0.0          # docling>=2.14 requires this (3.x lacks DecodePageConfig)
 PyMuPDF==1.25.1
 huggingface-hub
 
