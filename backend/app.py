@@ -273,7 +273,8 @@ def _build_retrieval(query: str, top_k: int, component_filter: str | None):
         retriever=retriever,
         config=RAGConfig(
             top_k=top_k,
-            max_context_chars=12000,
+            max_context_chars=20000,    # raised: full elec-char table can be ~15k chars
+            default_trimmed_chunks=20,  # raised from 2: stops silent row-drops
         ),
     )
     max_ctx = None  # let assemble_context use char budget instead of hard chunk cap
@@ -428,8 +429,8 @@ class ChatRequest(BaseModel):
     query: str
     component_filter: str | None = None
     top_k: int = 50         # raised to 50 — broader pool for summarization pipeline
-    max_new_tokens: int = 512
-    temperature: float = 0.2
+    max_new_tokens: int = 900  # raised: multi-row tables need room to generate all rows
+    temperature: float = 0.1  # lowered: stricter extraction fidelity
     use_section_summary: bool = False   # enable multi-step section summarization
 
 
