@@ -14,7 +14,7 @@ chromadb==0.5.21
 sentence-transformers>=2.7.0
 
 # ── PDF parsing (Docling) ─────────────────────────────────────────────────────
-docling>=2.14.0              # 2.14+ supports huggingface-hub>=1.x (no more hub downgrade)
+docling>=2.14.0,<2.30.0      # 2.14+ has docling-parse 5.x; <2.30 avoids rapidocr/polyfactory deps
 docling-core
 docling-parse>=5.0.0          # docling>=2.14 requires this (3.x lacks DecodePageConfig)
 PyMuPDF==1.25.1
@@ -66,3 +66,4 @@ banks
 lxml
 typer
 pylatexenc                    # required by docling>=2.14 latex backend
+polyfactory>=2.22.2           # required by docling 2.2x+

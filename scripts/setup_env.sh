@@ -21,7 +21,7 @@ pip install pydantic fastapi "uvicorn>=0.34.0" python-multipart python-dotenv \
     "requests==2.32.4" bcrypt build chroma-hnswlib kubernetes posthog pypika \
     dataclasses-json deprecated dirtyjson filetype tinytag typing-inspect \
     llama-index-workflows jsonref latex2mathml deepsearch-glm easyocr \
-    marko python-docx python-pptx jsonlines banks lxml "typer>=0.24.0" pylatexenc \
+    marko python-docx python-pptx jsonlines banks lxml "typer>=0.24.0" pylatexenc "polyfactory>=2.22.2" \
     onnxruntime "opentelemetry-api==1.38.0" "opentelemetry-sdk==1.38.0" \
     "opentelemetry-exporter-otlp-proto-grpc==1.38.0" "opentelemetry-exporter-otlp-proto-http==1.38.0" \
     "opentelemetry-exporter-otlp-proto-common==1.38.0" "opentelemetry-proto==1.38.0" \
