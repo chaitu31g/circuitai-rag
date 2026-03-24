@@ -65,3 +65,4 @@ jsonlines
 banks
 lxml
 typer
+pylatexenc                    # required by docling>=2.14 latex backend
