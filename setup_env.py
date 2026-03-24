@@ -41,7 +41,7 @@ def main():
         "dataclasses-json", "deprecated", "dirtyjson", "filetype", "tinytag", "typing-inspect",
         "llama-index-workflows", "jsonref", "latex2mathml", "deepsearch-glm", "easyocr",
         "marko", "python-docx", "python-pptx", "jsonlines", "banks", "lxml", "typer>=0.24.0",
-        "pylatexenc", "polyfactory>=2.22.2",
+        "pylatexenc", "polyfactory>=2.22.2", "docling-ibm-models>=2.0.6,<3.0.0",
         "onnxruntime", "opentelemetry-api==1.38.0", "opentelemetry-sdk==1.38.0",
         "opentelemetry-exporter-otlp-proto-grpc==1.38.0", "opentelemetry-exporter-otlp-proto-http==1.38.0",
         "opentelemetry-exporter-otlp-proto-common==1.38.0", "opentelemetry-proto==1.38.0",
