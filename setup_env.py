@@ -7,7 +7,6 @@ def run_pip(args):
     """Run a pip command using the current Python interpreter."""
     cmd = [sys.executable, "-m", "pip"] + args
     print(f"\n>>> Executing: {' '.join(cmd)}")
-    # Use check=True to stop on errors (same as set -e in bash)
     try:
         subprocess.run(cmd, check=True)
     except subprocess.CalledProcessError as e:
@@ -15,13 +14,11 @@ def run_pip(args):
         sys.exit(1)
 
 def main():
-    # Ensure current directory is the project root (where backend/ is)
     project_root = os.path.dirname(os.path.abspath(__file__))
     os.chdir(project_root)
 
-    print("=== PROJECT ENVIRONMENT SETUP (TIERED INSTALLATION) ===")
-    print("Strategy: Forced installation to bypass dependency backtracking.")
-
+    print("=== PROJECT ENVIRONMENT SETUP (5-TIER INSTALLATION) ===")
+    
     # Tier 1
     print("\n--- Tier 1: Non-Negotiable AI Engine ---")
     run_pip(["install", "-U", "transformers>=5.3.0", "tokenizers==0.22.2", "huggingface-hub>=1.7.0"])
@@ -35,13 +32,21 @@ def main():
     run_pip(["install", "chromadb==0.5.21", "docling==2.11.0", "--no-deps"])
 
     # Tier 4
-    print("\n--- Tier 4: Missing Gears (Manual Sub-dependencies) ---")
-    run_pip(["install", "pydantic", "fastapi", "uvicorn", "python-multipart", "python-dotenv"])
-    run_pip(["install", "bcrypt", "build", "chroma-hnswlib==0.7.6", "kubernetes", "posthog", "pypika"])
-    run_pip(["install", "dataclasses-json", "deprecated", "dirtyjson", "filetype", "tinytag", "typing-inspect"])
-    run_pip(["install", "llama-index-workflows", "jsonref", "latex2mathml", "deepsearch-glm", "docling-parse", "easyocr", "marko", "pypdfium2", "python-docx", "python-pptx", "jsonlines", "banks", "lxml", "typer"])
+    print("\n--- Tier 4: Surgical Downgrade for Parser ---")
+    run_pip(["install", "docling-parse>=3.0.0,<4.0.0", "pypdfium2>=4.30.0,<5.0.0", "docling-ibm-models>=2.0.6,<3.0.0"])
 
-    print("\n=== All Tiers Installed! Tiered installation complete. ===")
+    # Tier 5
+    print("\n--- Tier 5: Missing Gears (Manual Sub-dependencies) ---")
+    run_pip([
+        "install", "pydantic", "fastapi", "uvicorn", "python-multipart", "python-dotenv",
+        "bcrypt", "build", "chroma-hnswlib", "kubernetes", "posthog", "pypika",
+        "dataclasses-json", "deprecated", "dirtyjson", "filetype", "tinytag", "typing-inspect",
+        "llama-index-workflows", "jsonref", "latex2mathml", "deepsearch-glm", "easyocr",
+        "marko", "python-docx", "python-pptx", "jsonlines", "banks", "lxml", "typer",
+        "onnxruntime", "opentelemetry-exporter-otlp-proto-grpc", "opentelemetry-instrumentation-fastapi"
+    ])
+
+    print("\n=== All Tiers Installed! Environment is fixed. ===")
 
 if __name__ == "__main__":
     main()

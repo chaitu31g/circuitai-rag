@@ -14,10 +14,15 @@ pip install -r backend/requirements.txt --no-deps
 echo "--- Tier 3: Legacy Complainers ---"
 pip install chromadb==0.5.21 docling==2.11.0 --no-deps
 
-echo "--- Tier 4: Missing Gears (Manual Sub-dependencies) ---"
-pip install pydantic fastapi uvicorn python-multipart python-dotenv
-pip install bcrypt build chroma-hnswlib==0.7.6 kubernetes posthog pypika
-pip install dataclasses-json deprecated dirtyjson filetype tinytag typing-inspect
-pip install llama-index-workflows jsonref latex2mathml deepsearch-glm docling-parse easyocr marko pypdfium2 python-docx python-pptx jsonlines banks lxml typer
+echo "--- Tier 4: Surgical Downgrade for Parser ---"
+pip install "docling-parse>=3.0.0,<4.0.0" "pypdfium2>=4.30.0,<5.0.0" "docling-ibm-models>=2.0.6,<3.0.0"
 
-echo "Done! Tiered installation complete."
+echo "--- Tier 5: Missing Gears (Manual Sub-dependencies) ---"
+pip install pydantic fastapi uvicorn python-multipart python-dotenv \
+    bcrypt build chroma-hnswlib kubernetes posthog pypika \
+    dataclasses-json deprecated dirtyjson filetype tinytag typing-inspect \
+    llama-index-workflows jsonref latex2mathml deepsearch-glm easyocr \
+    marko python-docx python-pptx jsonlines banks lxml typer \
+    onnxruntime opentelemetry-exporter-otlp-proto-grpc opentelemetry-instrumentation-fastapi
+
+echo "Done! 5-Tier installation complete."
