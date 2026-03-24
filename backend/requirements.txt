@@ -5,6 +5,7 @@ pydantic==2.10.3
 pydantic-settings==2.7.0
 python-multipart==0.0.19
 Requests==2.32.3
+python-dotenv
 
 # ── Vector database ───────────────────────────────────────────────────────────
 chromadb==0.5.21
@@ -14,29 +15,26 @@ sentence-transformers>=2.7.0
 
 # ── PDF parsing ───────────────────────────────────────────────────────────────
 docling==2.11.0
-docling-ibm-models
 docling-core
-onnxruntime
+docling-parse
+PyMuPDF==1.25.1
+huggingface-hub>=1.7.0
+
+# ── HuggingFace / Transformers stack ─────────────────────────────────────────
+transformers>=5.3.0
+tokenizers==0.22.2
+accelerate>=0.29.0
+bitsandbytes>=0.43.0     
+safetensors>=0.4.0       
+sentencepiece>=0.1.99    
+
+# ── DePlot / graph extraction ─────────────────────────────────────────────────
+Pillow>=10.4.0
+numpy>=1.24.0
+timm>=0.9.0               
+
+# ── Additional LlamaIndex integrations ────────────────────────────────────────
 llama-index-core
 llama-index-readers-docling
 llama-index-vector-stores-chroma
-PyMuPDF==1.25.1
-huggingface-hub>=0.34.0, <1.0.0 # Maintain compatibility with docling
-
-# ── HuggingFace / Transformers stack ─────────────────────────────────────────
-# torch is NOT listed here — Colab provides a CUDA-enabled build pre-installed.
-# When running locally: pip install torch --index-url https://download.pytorch.org/whl/cu121
-transformers>=4.45.0, <4.50.0     # Cap to maintain compatibility with chromadb (tokenizers pin)
-tokenizers==0.20.3              # chromadb 0.5.21 needs <= 0.20.3
-accelerate
-torchvision
-bitsandbytes>=0.43.0     # 4-bit NF4 quantisation for Qwen3.5-4B (fits on T4)
-safetensors>=0.4.0       # fast, safe weight loading for Qwen3.5-4B / DePlot shards
-sentencepiece>=0.1.99    # required by some tokenizers (Qwen3.5 uses tiktoken but safe to keep)
-
-# ── DePlot / graph extraction ─────────────────────────────────────────────────
-# google/deplot  →  charts, graphs, characteristic curves only
-Pillow>=10.4.0, <11.0.0      # Pin for docling-ibm-models
-numpy>=1.24.0
-timm>=0.9.0               # DePlot uses vision backbone from timm
-
+llama-index-workflows
