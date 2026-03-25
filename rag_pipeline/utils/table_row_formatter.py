@@ -2,6 +2,45 @@ from typing import List
 import re
 from ingestion.datasheet_chunker import Chunk
 
+# Known sub-header tokens for multi-row header detection
+_SUBHDR = frozenset({
+    "min", "min.", "minimum",
+    "typ", "typ.", "typical", "nom", "nom.", "nominal",
+    "max", "max.", "maximum",
+    "value", "values", "val",
+    "rating", "ratings", "limit", "limits",
+})
+
+
+def _is_subheader_row(row: list) -> bool:
+    """True if row looks like a sub-header (e.g., min. / typ. / max.)."""
+    non_empty = [c.strip() for c in row if c.strip()]
+    if not non_empty:
+        return False
+    matched = sum(1 for c in non_empty if c.lower().rstrip(".") in _SUBHDR)
+    if matched < 2:
+        return False
+    if any(len(c) > 20 for c in non_empty):
+        return False
+    return True
+
+
+def _merge_header_rows(parent: list, sub: list) -> list:
+    """Merge parent + sub-header rows into one flat header list."""
+    length = max(len(parent), len(sub))
+    merged = []
+    for i in range(length):
+        p = parent[i].strip() if i < len(parent) else ""
+        s = sub[i].strip()    if i < len(sub)    else ""
+        if s and s.lower().rstrip(".") in _SUBHDR:
+            merged.append(s)
+        elif s and not p:
+            merged.append(s)
+        else:
+            merged.append(p)
+    return merged
+
+
 def format_table_rows(table: dict, section_name: str, part_number: str, table_number: int) -> List[Chunk]:
     """
     Transforms a parsed table into a list of row-level parameter chunks.
@@ -29,9 +68,16 @@ def format_table_rows(table: dict, section_name: str, part_number: str, table_nu
     if len(sorted_rows) < 2:
         return []
 
-    headers = [h.strip() for h in sorted_rows[0]]
+    # ── Detect two-row headers (e.g., "Values" → min. / typ. / max.) ─────────
+    data_start = 1
+    raw_headers = sorted_rows[0]
+    if len(sorted_rows) >= 3 and _is_subheader_row(sorted_rows[1]):
+        raw_headers = _merge_header_rows(sorted_rows[0], sorted_rows[1])
+        data_start  = 2   # skip the sub-header row in data processing
+
+    headers = [h.strip() for h in raw_headers]
     num_cols = len(headers)
-    
+
     # Identify unit column
     unit_col_idx = -1
     for i, h in enumerate(headers):
@@ -42,7 +88,13 @@ def format_table_rows(table: dict, section_name: str, part_number: str, table_nu
     page = (table.get("prov") or [{}])[0].get("page_no")
     chunks: List[Chunk] = []
 
-    for row in sorted_rows[1:]:
+    # ── Blank-cell inheritance tracking ──────────────────────────────────────
+    param_col_idx = next((i for i, h in enumerate(headers) if "parameter" in h.lower()), None)
+    symbol_col_idx = next((i for i, h in enumerate(headers) if "symbol" in h.lower()), None)
+    current_param = ""
+    current_symbol = ""
+
+    for row in sorted_rows[data_start:]:
         # Pad row to match headers
         while len(row) < num_cols:
             row.append("")
@@ -50,6 +102,21 @@ def format_table_rows(table: dict, section_name: str, part_number: str, table_nu
         # Skip empty rows
         if not any(cell for cell in row):
             continue
+
+        # ── Blank-cell inheritance ────────────────────────────────────────────
+        if param_col_idx is not None:
+            cell = row[param_col_idx].strip()
+            if cell and cell not in {"-", "—", "N/A"}:
+                current_param = cell
+            elif current_param:
+                row[param_col_idx] = current_param
+
+        if symbol_col_idx is not None:
+            sym = row[symbol_col_idx].strip()
+            if sym and sym not in {"-", "—", "N/A"}:
+                current_symbol = sym
+            elif current_symbol:
+                row[symbol_col_idx] = current_symbol
 
         unit_str = ""
         if unit_col_idx != -1 and unit_col_idx < len(row):
@@ -77,9 +144,9 @@ def format_table_rows(table: dict, section_name: str, part_number: str, table_nu
                 hdr_display = "Minimum"
             elif "max" in hdr_lower:
                 hdr_display = "Maximum"
-            elif "typ" in hdr_lower:
+            elif "typ" in hdr_lower or "nom" in hdr_lower:
                 hdr_display = "Typical"
-            elif "value" in hdr_lower:
+            elif "value" in hdr_lower or "val" in hdr_lower:
                 hdr_display = "Value"
             else:
                 hdr_display = hdr_orig or f"Column {i}"
@@ -94,16 +161,6 @@ def format_table_rows(table: dict, section_name: str, part_number: str, table_nu
 
         if parts:
             text = "\n".join(parts)
-            # Add prefix context to improve embedding? We won't strictly add it unless it helps, 
-            # but usually just the table text is sufficient if chunk metadata is used, 
-            # however it's a good practice to include part number in the text.
-            # Wait! The example from user specifically requested exactly:
-            # Parameter: Continuous drain current
-            # Symbol: ID
-            # Condition: TA = 25°C
-            # Value: 0.23 A
-            # So I will not add extra strings that pollute the chunk text.
-            
             metadata = {
                 "type": "table_row",
                 "component_name": part_number,

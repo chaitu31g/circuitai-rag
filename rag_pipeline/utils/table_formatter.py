@@ -329,7 +329,21 @@ def format_table_rows(
 
     # ── 2. Extract and normalise headers ─────────────────────────────────────
     raw_headers = sorted_rows[0]
-    headers = [_normalise_header(h) for h in raw_headers]
+
+    # ── 2b. Detect two-row headers (e.g., "Values" → min. / typ. / max.) ────
+    # Some datasheets use a merged parent header ("Values") spanning multiple
+    # physical sub-columns ("min.", "typ.", "max."). Docling returns these as
+    # separate rows.  We detect the sub-header row and merge the two rows into
+    # a single flat header list so each sub-column gets its own canonical name.
+    data_start_row = 1   # default: data rows start at sorted_rows[1]
+    if len(sorted_rows) >= 3 and _is_subheader_row(sorted_rows[1]):
+        raw_headers    = _merge_header_rows(sorted_rows[0], sorted_rows[1])
+        data_start_row = 2   # skip both header row AND sub-header row
+        logger.debug(
+            "format_table_rows: two-row header detected — merged to %s", raw_headers
+        )
+
+    headers  = [_normalise_header(h) for h in raw_headers]
     num_cols = len(headers)
 
     # Locate the Unit column so values can be merged with their units
@@ -348,8 +362,18 @@ def format_table_rows(
     # ── 4. Convert each data row into a structured paragraph ─────────────────
     chunks: List[str] = []
     current_subtitle: str = ""   # last seen section subtitle row
+    current_param: str = ""      # last seen non-blank Parameter value (for blank-cell inheritance)
+    current_symbol: str = ""     # last seen non-blank Symbol value
 
-    for row in sorted_rows[1:]:
+    # Find Parameter and Symbol column indices for inheritance tracking
+    param_col_idx: Optional[int] = next(
+        (i for i, h in enumerate(headers) if h == "Parameter"), None
+    )
+    symbol_col_idx: Optional[int] = next(
+        (i for i, h in enumerate(headers) if h == "Symbol"), None
+    )
+
+    for row in sorted_rows[data_start_row:]:
 
         # Pad short rows
         while len(row) < num_cols:
@@ -363,6 +387,25 @@ def format_table_rows(
         if _is_section_subtitle(row):
             current_subtitle = next(c.strip() for c in row if c.strip())
             continue
+
+        # ── Blank-cell inheritance: fill Parameter/Symbol from previous row ──
+        # PDF datasheets only write the parameter name once per group of rows.
+        # Subsequent condition rows have blank Parameter (and often Symbol) cells.
+        # We propagate the last-seen name/symbol so every stored chunk is
+        # self-contained and searchable without the LLM needing to infer context.
+        if param_col_idx is not None:
+            cell = row[param_col_idx].strip()
+            if not _is_empty_value(cell):
+                current_param = cell      # new named parameter — update tracker
+            elif current_param:
+                row[param_col_idx] = current_param  # inherit from above
+
+        if symbol_col_idx is not None:
+            sym_cell = row[symbol_col_idx].strip()
+            if not _is_empty_value(sym_cell):
+                current_symbol = sym_cell
+            elif current_symbol and _is_empty_value(row[symbol_col_idx].strip()):
+                row[symbol_col_idx] = current_symbol  # inherit from above
 
         # ── Build the parameter lines ─────────────────────────────────────────
         lines: List[str] = []

@@ -340,8 +340,8 @@ def build_prompt(context: str, query: str) -> list[dict]:
         "2. Rows found:\n"
         "   - Row 1: <PARAM_A> | <SYM_A> | <COND_A> | - | - | <VAL1> | <UNIT>  "
         "<- EXACT MATCH (named)\n"
-        "   - Row 2: [BLANK] | [BLANK] | <COND_B> | - | - | <VAL2> | <UNIT>  "
-        "<- EXACT MATCH via Rule 0 (blank cell inherits <PARAM_A> from row above)\n"
+        "   - Row 2: (empty cell) | (empty cell) | <COND_B> | - | - | <VAL2> | <UNIT>  "
+        "<- EXACT MATCH via Rule 0 (empty Parameter cell inherits <PARAM_A> from the row above)\n"
         "3. Rejected rows:\n"
         "   - '<PARAM_B>' — REJECTED: new non-blank parameter name, row 2 was the last "
         "blank-cell continuation of <PARAM_A>\n"
@@ -567,8 +567,27 @@ def _filter_reasoning_steps(text: str) -> str:
     # Users should never see it — only the final Markdown table.
     text = re.sub(r"<THINKING>[\s\S]*?</THINKING>", "", text, flags=re.IGNORECASE).strip()
 
+    # Fallback: if the model wrote <THINKING> but forgot to close </THINKING>,
+    # the regex above won't match. Detect any remaining opening tag and strip
+    # everything up to the first markdown table row (first `|` character).
+    # If there's no table either, strip from <THINKING> to end of string.
+    if re.search(r"<THINKING>", text, re.IGNORECASE):
+        table_start = text.find("|")
+        if table_start > 0:
+            text = text[table_start:].strip()
+        else:
+            text = re.sub(r"<THINKING>[\s\S]*", "", text, flags=re.IGNORECASE).strip()
+
     # ── Priority 2: strip Qwen's native <think>...</think> blocks ────────────
     text = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE).strip()
+
+    # Fallback: unclosed <think> block — same logic as above
+    if re.search(r"<think>", text, re.IGNORECASE):
+        table_start = text.find("|")
+        if table_start > 0:
+            text = text[table_start:].strip()
+        else:
+            text = re.sub(r"<think>[\s\S]*", "", text, flags=re.IGNORECASE).strip()
 
     # ── Priority 3: legacy "Thinking Process:" / "Draft N:" pattern ──────────
     if re.search(r"(?i)thinking process|analyze the request", text):
