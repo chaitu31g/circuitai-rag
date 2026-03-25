@@ -589,29 +589,43 @@ def chunk_document(
             _add(chunk)
 
     # Tables — Use document hierarchy for titles and sections
-    table_contexts = _get_table_contexts(docling_data)
+    has_valid_pdf = pdf_path and Path(pdf_path).exists()
     
-    for i, tbl in enumerate(tables):
-        ctx = table_contexts.get(i)
-        if ctx:
-            best_sec, table_title = ctx
-        else:
-            # Fallback to page-based logic if hierarchy failed
-            page     = (tbl.get("prov") or [{}])[0].get("page_no")
-            best_sec = "electrical_characteristics"
-            for t in texts:
-                t_page = (t.get("prov") or [{}])[0].get("page_no") if t.get("prov") else None
-                if t_page == page:
-                    d = _detect_section(t.get("text", ""))
-                    if d and d not in _SKIP_TYPES:
-                        best_sec = d
-                        break
-            table_title = ""
+    if has_valid_pdf:
+        from rag_pipeline.parsers.hybrid_table_parser import extract_tables_hybrid
+        try:
+            table_chunks = extract_tables_hybrid(str(pdf_path), docling_data, part_number)
+            for tc in table_chunks:
+                _add(tc)
+        except Exception as e:
+            logger.error(f"Hybrid table parser completely failed for {part_number}: {e}")
+            has_valid_pdf = False  # trigger fallback
 
-        from rag_pipeline.utils.parameter_extractor import extract_parameter_rows
-        row_chunks = extract_parameter_rows(tbl, best_sec, part_number, i + 1, table_title=table_title)
-        for rc in row_chunks:
-            _add(rc)
+    if not has_valid_pdf:
+        # Fallback to standard docling-only extraction
+        table_contexts = _get_table_contexts(docling_data)
+        
+        for i, tbl in enumerate(tables):
+            ctx = table_contexts.get(i)
+            if ctx:
+                best_sec, table_title = ctx
+            else:
+                # Fallback to page-based logic if hierarchy failed
+                page     = (tbl.get("prov") or [{}])[0].get("page_no")
+                best_sec = "electrical_characteristics"
+                for t in texts:
+                    t_page = (t.get("prov") or [{}])[0].get("page_no") if t.get("prov") else None
+                    if t_page == page:
+                        d = _detect_section(t.get("text", ""))
+                        if d and d not in _SKIP_TYPES:
+                            best_sec = d
+                            break
+                table_title = ""
+    
+            from rag_pipeline.utils.parameter_extractor import extract_parameter_rows
+            row_chunks = extract_parameter_rows(tbl, best_sec, part_number, i + 1, table_title=table_title)
+            for rc in row_chunks:
+                _add(rc)
 
     # Figures
     for fig in pictures:
