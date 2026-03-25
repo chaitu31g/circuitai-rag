@@ -1,2 +1,2 @@
 export const API_BASE_URL =
-  "https://hospitality-reaches-pastor-exhibition.trycloudflare.com";
+  "https://duplicate-schemes-drove-charitable.trycloudflare.com";
