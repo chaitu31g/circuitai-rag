@@ -586,7 +586,7 @@ def _filter_reasoning_steps(text: str) -> str:
     if table_line_idx is not None and table_line_idx > 0:
         # There IS a table and there IS text before it — strip the preamble.
         text = "\n".join(lines[table_line_idx:]).strip()
-        return text   # Done — no further processing needed for table responses.
+        # Do NOT return early. Stray closing tags after the table must still be stripped.
 
     # ── Priority 1: strip <THINKING>...</THINKING> ───────────────────────────
     text = re.sub(r"<THINKING>[\s\S]*?</THINKING>", "", text, flags=re.IGNORECASE).strip()
@@ -598,6 +598,14 @@ def _filter_reasoning_steps(text: str) -> str:
     text = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE).strip()
     if re.search(r"<think>", text, re.IGNORECASE):
         text = re.sub(r"<think>[\s\S]*", "", text, flags=re.IGNORECASE).strip()
+
+    # ── Priority 2.5: Strip stray closing/chunk tags ─────────────────────────
+    # If Priority 0 stripped the opening tag, closing tags might be orphaned at the end.
+    text = re.sub(r"</?think>", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"</?thinking>", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"</?datasheettable>", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"</?datasheet_table>", "", text, flags=re.IGNORECASE)
+    text = text.strip()
 
     # ── Priority 3: legacy "Thinking Process:" / "Draft N:" pattern ──────────
     if re.search(r"(?i)thinking process|analyze the request", text):

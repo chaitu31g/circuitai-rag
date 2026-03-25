@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 # Internal helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _scrub_and_ffill(rows: list[list[str]]) -> list[list[str]]:
+def _scrub_and_ffill(rows: list[list[str]], headers: list[str] = None) -> list[list[str]]:
     """Bulletproof merged-cell repair for Docling table rows.
 
     Docling inserts several kinds of "empty" values into cells that belong to
@@ -48,6 +48,8 @@ def _scrub_and_ffill(rows: list[list[str]]) -> list[list[str]]:
       • Column 1 (Symbol) — same
       • Last column (Unit) — Docling only sets it in the first condition row;
         continuation rows leave it blank, causing unit to disappear from chunks.
+      • Conditions column — (if detected in headers) forward-fills test conditions 
+        for parameters spanning multiple rows.
     """
     try:
         import pandas as pd
@@ -62,7 +64,16 @@ def _scrub_and_ffill(rows: list[list[str]]) -> list[list[str]]:
     n_cols = df.shape[1]
 
     # Columns to forward-fill: first two (param, symbol) + last (unit)
-    fill_cols = list(dict.fromkeys([0, 1, n_cols - 1]))  # dedup in case ncols<=2
+    fill_cols = [0, 1, n_cols - 1]
+
+    # Also forward-fill the 'Conditions' column so sub-rows inherit test parameters
+    if headers:
+        for i, h in enumerate(headers):
+            if "condition" in h.lower() or "test" in h.lower():
+                if i < n_cols:
+                    fill_cols.append(i)
+
+    fill_cols = list(dict.fromkeys(fill_cols))  # dedup in case ncols<=2
 
     # ── Step 1: Scrub ALL forms of empty from fill columns ────────────────────
     for col in fill_cols:
@@ -291,7 +302,7 @@ def extract_parameter_rows(
         "[ffill] table=%d  before=%d rows  headers=%s",
         table_number, len(rows_to_process), headers[:4],
     )
-    rows_to_process = _scrub_and_ffill(rows_to_process)
+    rows_to_process = _scrub_and_ffill(rows_to_process, headers)
     logger.debug("[ffill] table=%d  after =%d rows", table_number, len(rows_to_process))
 
     # ── Build Markdown table (wrapped in XML tags for LLM prompt coherence) ───
