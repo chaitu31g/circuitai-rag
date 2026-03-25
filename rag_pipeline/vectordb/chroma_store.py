@@ -122,11 +122,29 @@ class ChromaStore(VectorStore):
     ) -> List[Dict[str, Any]]:
         """Nearest-neighbour search. Returns list of result dicts."""
         # ChromaDB raises an error if n_results > collection size.
-        # Clamp n_results to the current document count (minimum 1).
+        # CRITICAL: if metadata tags (where={...}) are used, n_results MUST 
+        # not exceed the number of documents that match the filter. Otherwise,
+        # hnswlib crashes with 'RuntimeError: Cannot return results as 2D array'.
         total = self._collection.count()
         if total == 0:
             return []
-        effective_n = max(1, min(n_results, total))
+
+        effective_n = n_results
+        if filters:
+            try:
+                # Get the IDs of all documents matching the metadata filter
+                res = self._collection.get(where=filters, include=[])
+                filtered_count = len(res.get("ids", []))
+                effective_n = min(n_results, filtered_count)
+            except Exception as exc:
+                logger.warning("ChromaStore: filtered count failed (%s)", exc)
+                effective_n = min(n_results, total)
+        else:
+            effective_n = min(n_results, total)
+
+        if effective_n <= 0:
+            logger.debug("ChromaStore: zero results match filters — skipping query")
+            return []
 
         results = self._collection.query(
             query_embeddings=[query_embedding],
