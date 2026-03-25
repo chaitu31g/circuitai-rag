@@ -143,6 +143,52 @@ def extract_parameter_rows(
 
     raw_headers = sorted_rows[header_idx]
 
+    # ── Detect two-row header (e.g., "Values" parent → min./typ./max. sub) ───
+    # Many datasheets use a merged parent header ("Values" or "Ratings") that
+    # spans multiple sub-columns. Docling returns these as separate rows.
+    # Detect and merge so each sub-column gets its own name.
+    _SUBHDR = frozenset({
+        "min", "min.", "minimum",
+        "typ", "typ.", "typical", "nom", "nom.", "nominal",
+        "max", "max.", "maximum",
+        "value", "values", "val",
+        "rating", "ratings", "limit", "limits",
+    })
+
+    def _is_subheader_row(row: list) -> bool:
+        non_empty = [c.strip() for c in row if c.strip()]
+        if not non_empty:
+            return False
+        matched = sum(1 for c in non_empty if c.lower().rstrip(".") in _SUBHDR)
+        if matched < 2:
+            return False
+        # Reject if any cell is longer than 20 chars (a real parameter value)
+        if any(len(c) > 20 for c in non_empty):
+            return False
+        return True
+
+    data_row_start = header_idx + 1
+    next_row_idx = header_idx + 1
+    if next_row_idx < len(sorted_rows) and _is_subheader_row(sorted_rows[next_row_idx]):
+        # Merge parent header + sub-header into one flat list
+        sub = sorted_rows[next_row_idx]
+        length = max(len(raw_headers), len(sub))
+        merged: list[str] = []
+        for i in range(length):
+            p = raw_headers[i].strip() if i < len(raw_headers) else ""
+            s = sub[i].strip()         if i < len(sub)         else ""
+            if s and s.lower().rstrip(".") in _SUBHDR:
+                merged.append(s)      # prefer sub-header label (min./typ./max.)
+            elif s and not p:
+                merged.append(s)      # sub-header fills an otherwise-empty slot
+            else:
+                merged.append(p)      # keep parent header
+        raw_headers = merged
+        data_row_start = next_row_idx + 1   # skip the sub-header row as data
+        logger.debug(
+            "extract_parameter_rows: two-row header merged → %s", raw_headers
+        )
+
     # Handle the rare case where header cells contain merged header+data
     headers: list[str] = []
     first_data_from_header: list[str] = []
@@ -160,7 +206,7 @@ def extract_parameter_rows(
     rows_to_process: list[list[str]] = []
     if first_data_from_header and any(first_data_from_header):
         rows_to_process.append(first_data_from_header)
-    rows_to_process.extend(sorted_rows[header_idx + 1:])
+    rows_to_process.extend(sorted_rows[data_row_start:])
 
     if not rows_to_process:
         return []

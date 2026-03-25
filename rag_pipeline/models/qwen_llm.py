@@ -554,40 +554,50 @@ def json_to_markdown(json_string: str) -> str:
 def _filter_reasoning_steps(text: str) -> str:
     """Strip all CoT / thinking blocks from model output before returning to user.
 
-    Handles four kinds of reasoning block / output format:
-      1. Our own <THINKING>...</THINKING> (Chain-of-Thought protocol)
-      2. Qwen's native <think>...</think> internal reasoning mode
-      3. Legacy heading-based reasoning patterns ("Thinking Process:", "Step 1:", ...)
-      4. JSON array output — converted to Markdown via json_to_markdown()
+    Strategy
+    --------
+    Priority 0 — Table anchor (most reliable):
+        When the answer is a Markdown table (it always should be for spec queries),
+        strip everything before the first line that starts with '|'. This works
+        regardless of what tag variant the model uses for its thinking block or
+        whether it closes the tag properly.
+
+    Priority 1 — <THINKING>...</THINKING> tag pair (our CoT protocol).
+    Priority 2 — <think>...</think> tag pair (Qwen native reasoning).
+    Priority 3 — Legacy "Thinking Process:" / "Draft N:" heading patterns.
+    Priority 4 — Numbered / bulleted section headers.
+    Priority 5 — JSON array → Markdown table conversion.
     """
     import re
 
-    # ── Priority 1: strip our CoT <THINKING>...</THINKING> blocks ────────────
-    # This is the block the model is explicitly instructed to produce.
-    # Users should never see it — only the final Markdown table.
+    if not text:
+        return text
+
+    # ── Priority 0: Table-anchor strip ───────────────────────────────────────
+    # The expected output for spec queries is ALWAYS a Markdown table.
+    # Find the first line that starts with '|' (the table header) and drop
+    # everything before it. This handles ALL thinking-block variants:
+    # <THINKING>, <THINKING], <think>, raw numbered lists, etc.
+    lines = text.splitlines()
+    table_line_idx = next(
+        (i for i, line in enumerate(lines) if line.strip().startswith("|")),
+        None,
+    )
+    if table_line_idx is not None and table_line_idx > 0:
+        # There IS a table and there IS text before it — strip the preamble.
+        text = "\n".join(lines[table_line_idx:]).strip()
+        return text   # Done — no further processing needed for table responses.
+
+    # ── Priority 1: strip <THINKING>...</THINKING> ───────────────────────────
     text = re.sub(r"<THINKING>[\s\S]*?</THINKING>", "", text, flags=re.IGNORECASE).strip()
-
-    # Fallback: if the model wrote <THINKING> but forgot to close </THINKING>,
-    # the regex above won't match. Detect any remaining opening tag and strip
-    # everything up to the first markdown table row (first `|` character).
-    # If there's no table either, strip from <THINKING> to end of string.
     if re.search(r"<THINKING>", text, re.IGNORECASE):
-        table_start = text.find("|")
-        if table_start > 0:
-            text = text[table_start:].strip()
-        else:
-            text = re.sub(r"<THINKING>[\s\S]*", "", text, flags=re.IGNORECASE).strip()
+        # Unclosed tag — strip from the opening tag to end of string
+        text = re.sub(r"<THINKING>[\s\S]*", "", text, flags=re.IGNORECASE).strip()
 
-    # ── Priority 2: strip Qwen's native <think>...</think> blocks ────────────
+    # ── Priority 2: strip <think>...</think> ────────────────────────────────
     text = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE).strip()
-
-    # Fallback: unclosed <think> block — same logic as above
     if re.search(r"<think>", text, re.IGNORECASE):
-        table_start = text.find("|")
-        if table_start > 0:
-            text = text[table_start:].strip()
-        else:
-            text = re.sub(r"<think>[\s\S]*", "", text, flags=re.IGNORECASE).strip()
+        text = re.sub(r"<think>[\s\S]*", "", text, flags=re.IGNORECASE).strip()
 
     # ── Priority 3: legacy "Thinking Process:" / "Draft N:" pattern ──────────
     if re.search(r"(?i)thinking process|analyze the request", text):
