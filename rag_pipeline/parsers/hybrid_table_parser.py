@@ -37,6 +37,28 @@ def match_docling_table_with_pdftable(
         
     return min(pdf_tables, key=lambda t: abs(t["page"] - page_no))
 
+def is_subheader_row(row):
+    """
+    Detect non-data rows such as headers or subheaders.
+    """
+    if not row:
+        return True
+
+    # Normalize values
+    cells = [str(cell).strip() for cell in row if cell is not None]
+
+    if len(cells) == 0:
+        return True
+
+    # Check if row contains numeric values
+    has_number = any(any(char.isdigit() for char in cell) for cell in cells)
+
+    # If no numeric content → likely header/subheader
+    if not has_number:
+        return True
+
+    return False
+
 def extract_tables_hybrid(
     pdf_path: str,
     docling_data: dict,
@@ -110,63 +132,43 @@ def extract_tables_hybrid(
             all_chunks.extend(fallback_chunks)
             continue
             
-        data = matched_pt["data"]
-        
-        # Cleanup rows: convert None to "" and strip whitespace
-        clean_rows = []
-        for r in data:
-            if r:
-                clean_row = [str(c).replace('\n', ' ').strip() if c is not None else "" for c in r]
-                # Check if row is not completely empty
-                if any(clean_row):
+        try:
+            data = matched_pt["data"]
+            
+            # Extract main headers (we always assume first row is header)
+            # The prompt asks to add Safe Row Filtering for the remaining rows
+            if not data or len(data) < 2:
+                continue
+                
+            headers = [str(c).replace('\n', ' ').strip() if c is not None else "" for c in data[0]]
+            
+            clean_rows = []
+            # We iterate over rows after header
+            for row in data[1:]:
+                if not is_subheader_row(row):
+                    clean_row = [str(c).replace('\n', ' ').strip() if c is not None else "" for c in row]
                     clean_rows.append(clean_row)
                     
-        if len(clean_rows) < 2:
+            print(f"Total rows: {len(data) - 1}")  # excluding header
+            print(f"Filtered rows: {len(clean_rows)}")
+                        
+            if not clean_rows:
+                continue
+                
+            from rag_pipeline.utils.parameter_extractor import _scrub_and_ffill
+            
+            rows_to_process = clean_rows
+            
+            # Repair the grid holes via pandas forward fill
+            rows_to_process = _scrub_and_ffill(rows_to_process, headers)
+            
+        except Exception as e:
+            print(f"Hybrid parser error: {e}")
+            logger.warning(f"Failed to process matched PdfTable: {e}. Falling back to standard docling.")
+            from rag_pipeline.utils.parameter_extractor import extract_parameter_rows
+            fallback_chunks = extract_parameter_rows(tbl, best_sec, part_number, i + 1, table_title=table_title)
+            all_chunks.extend(fallback_chunks)
             continue
-            
-        from rag_pipeline.utils.parameter_extractor import _scrub_and_ffill, _is_subheader_row, _SPAN_TOKENS
-        
-        # Detect and merge 2-row headers if they exist
-        headers = clean_rows[0]
-        data_start_idx = 1
-        
-        if len(clean_rows) > 1 and _is_subheader_row(clean_rows[1], headers):
-            sub = clean_rows[1]
-            raw_headers = list(headers)
-            span_idx = next(
-                (i for i, h in enumerate(raw_headers) if any(kw in h.lower() for kw in _SPAN_TOKENS)),
-                None
-            )
-            
-            _SUBHDR = {"min", "typ", "max", "unit", "limit", "value", "min.", "typ.", "max."}
-            sub_tokens = [s.strip() for s in sub if s.strip() and s.lower().rstrip('.') in _SUBHDR]
-            
-            if span_idx is not None and sub_tokens:
-                before = list(raw_headers[:span_idx])
-                after = [p.strip() for p in raw_headers[span_idx + 1:] if p.strip()]
-                headers = before + sub_tokens + after
-            else:
-                length = max(len(raw_headers), len(sub))
-                merged = []
-                for idx in range(length):
-                    p = raw_headers[idx].strip() if idx < len(raw_headers) else ""
-                    s = sub[idx].strip() if idx < len(sub) else ""
-                    if s and s.lower().rstrip(".") in _SUBHDR:
-                        merged.append(s)
-                    elif s and not p:
-                        merged.append(s)
-                    else:
-                        merged.append(p)
-                headers = merged
-            data_start_idx = 2
-
-        rows_to_process = clean_rows[data_start_idx:]
-        
-        if not rows_to_process:
-            continue
-            
-        # Repair the grid holes via pandas forward fill
-        rows_to_process = _scrub_and_ffill(rows_to_process, headers)
         
         # Build Standard table_markdown chunk for the LLM visually
         from rag_pipeline.utils.parameter_extractor import _rows_to_markdown
