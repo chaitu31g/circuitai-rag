@@ -100,8 +100,8 @@ function MarkdownContent({ text = '', isStreaming = false }) {
         if (block.type === 'table') {
           const { header, rows } = parseTable(block.lines);
           return (
-            <div key={bi} className="overflow-x-auto my-3 rounded-lg border border-slate-600/50">
-              <table className="min-w-full text-xs border-collapse">
+            <div key={bi} style={{ overflowX: 'auto', maxWidth: '100%' }} className="my-3 rounded-lg border border-slate-600/50">
+              <table className="text-xs border-collapse" style={{ minWidth: 'max-content', width: '100%' }}>
                 <thead>
                   <tr className="bg-slate-700/70">
                     {header.map((h, hi) => (
@@ -225,12 +225,12 @@ function Message({ msg, elapsed = 0 }) {
         }
       </div>
 
-      <div className={`max-w-[80%] space-y-2 ${isUser ? 'items-end' : 'items-start'} flex flex-col`}>
+      <div className={`space-y-2 ${isUser ? 'items-end max-w-[80%]' : 'items-start w-full max-w-[92%]'} flex flex-col`}>
         {/* Bubble */}
         <div className={`px-4 py-3 rounded-2xl text-sm leading-relaxed
           ${isUser
             ? 'bg-indigo-600/80 text-white rounded-tr-sm'
-            : 'bg-slate-800/70 text-slate-200 border border-slate-700/50 rounded-tl-sm'
+            : 'bg-slate-800/70 text-slate-200 border border-slate-700/50 rounded-tl-sm w-full overflow-hidden'
           }`}
         >
           {msg.role === 'assistant' && msg.loading && !msg.content ? (

@@ -134,8 +134,19 @@ def extract_parameter_rows(
     if not rows_map:
         return []
 
+    # Use end_col_offset_idx (exclusive end) when available so spanning cells
+    # (like "Values" at start=3 spanning to end=6) correctly widen the grid.
+    # Without this, "Unit" at start=4 in the densely-numbered header row ends
+    # up at grid position 4, colliding with "typ." at position 4 in the sub-header.
+    def _cell_end_col(c: dict) -> int:
+        end = c.get("end_col_offset_idx")
+        if end is not None:
+            return end - 1   # exclusive → inclusive
+        # Fallback: use start position (1-column wide cell)
+        return c.get("col_index", c.get("start_col_offset_idx", 0))
+
     max_col = max(
-        c.get("col_index", c.get("start_col_offset_idx", 0))
+        _cell_end_col(c)
         for row_cells in rows_map.values()
         for c in row_cells
     )
@@ -195,21 +206,53 @@ def extract_parameter_rows(
     data_row_start = header_idx + 1
     next_row_idx = header_idx + 1
     if next_row_idx < len(sorted_rows) and _is_subheader_row(sorted_rows[next_row_idx]):
-        # Merge parent header + sub-header into one flat list
         sub = sorted_rows[next_row_idx]
-        length = max(len(raw_headers), len(sub))
-        merged: list[str] = []
-        for i in range(length):
-            p = raw_headers[i].strip() if i < len(raw_headers) else ""
-            s = sub[i].strip()         if i < len(sub)         else ""
-            if s and s.lower().rstrip(".") in _SUBHDR:
-                merged.append(s)      # prefer sub-header label (min./typ./max.)
-            elif s and not p:
-                merged.append(s)      # sub-header fills an otherwise-empty slot
-            else:
-                merged.append(p)      # keep parent header
-        raw_headers = merged
-        data_row_start = next_row_idx + 1   # skip the sub-header row as data
+
+        # ── Span-token replacement merge ──────────────────────────────────────
+        # The parent header may have a single merged cell like "Values" that
+        # spans the min/typ/max sub-columns.  If we naively merge by list
+        # position, "typ." (at sub[4]) can clobber "Unit" (at parent[4]) when
+        # Docling numbers the header row densely (without gap slots for spans).
+        #
+        # Robust fix: locate the span token ("Values", "Ratings" …) in the
+        # parent, replace it with the extracted sub-header tokens, and keep
+        # every other real parent header in its original relative order.
+        _SPAN_TOKENS = frozenset({
+            "values", "value", "rating", "ratings", "limit", "limits",
+        })
+        # Only keep cells in sub that are recognised sub-header labels
+        sub_tokens = [
+            s.strip() for s in sub
+            if s.strip() and s.strip().lower().rstrip(".") in _SUBHDR
+        ]
+
+        span_idx = next(
+            (i for i, p in enumerate(raw_headers)
+             if p.strip().lower() in _SPAN_TOKENS),
+            None,
+        )
+
+        if span_idx is not None and sub_tokens:
+            # before-span + sub-tokens + after-span (drop empty gap slots)
+            before = list(raw_headers[:span_idx])
+            after  = [p.strip() for p in raw_headers[span_idx + 1:] if p.strip()]
+            raw_headers = before + sub_tokens + after
+        else:
+            # Fallback: positional merge (no span token found)
+            length = max(len(raw_headers), len(sub))
+            merged: list[str] = []
+            for i in range(length):
+                p = raw_headers[i].strip() if i < len(raw_headers) else ""
+                s = sub[i].strip()         if i < len(sub)         else ""
+                if s and s.lower().rstrip(".") in _SUBHDR:
+                    merged.append(s)
+                elif s and not p:
+                    merged.append(s)
+                else:
+                    merged.append(p)
+            raw_headers = merged
+
+        data_row_start = next_row_idx + 1
         logger.debug(
             "extract_parameter_rows: two-row header merged → %s", raw_headers
         )
