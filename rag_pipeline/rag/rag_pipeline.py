@@ -373,6 +373,41 @@ class RAGPipeline:
             candidate_parts.append(formatted)
             total_candidate_chars += len(formatted) + (2 if len(candidate_parts) > 1 else 0)
 
+        # ── Table-level deduplication ─────────────────────────────────────────
+        # Both `table_markdown` chunks (the full table) AND `parameter_row` chunks
+        # (one per data row) are indexed for the same table.  If both are retrieved,
+        # the LLM receives the same data twice and outputs every row twice.
+        # Fix: if a table_markdown chunk is present, drop parameter_row chunks from
+        # the same (part_number, table_number) — the markdown already has all rows.
+        covered_tables: set[tuple] = set()
+        for doc in candidate_docs:
+            meta = doc.get("metadata") or {}
+            if meta.get("chunk_type") == "table_markdown":
+                key = (
+                    str(meta.get("part_number", "")),
+                    str(meta.get("table_number",  meta.get("table_index", ""))),
+                )
+                covered_tables.add(key)
+
+        if covered_tables:
+            filtered_docs:  list[dict] = []
+            filtered_parts: list[str]  = []
+            total_candidate_chars = 0
+            for doc, formatted in zip(candidate_docs, candidate_parts):
+                meta = doc.get("metadata") or {}
+                if meta.get("chunk_type") == "parameter_row":
+                    key = (
+                        str(meta.get("part_number", "")),
+                        str(meta.get("table_index",  meta.get("table_number", ""))),
+                    )
+                    if key in covered_tables:
+                        continue   # table_markdown covers this row — skip it
+                filtered_docs.append(doc)
+                filtered_parts.append(formatted)
+                total_candidate_chars += len(formatted)
+            candidate_docs  = filtered_docs
+            candidate_parts = filtered_parts
+
         effective_max_chunks = max_context_chunks
         if effective_max_chunks is None and total_candidate_chars > budget:
             # Default small-LLM optimization: if context is oversized, force top-2 chunks.

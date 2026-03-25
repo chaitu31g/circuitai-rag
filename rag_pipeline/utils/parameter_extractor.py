@@ -115,18 +115,43 @@ def extract_parameter_rows(
     if not cells:
         return []
 
-    # ── Reconstruct row matrix ────────────────────────────────────────────────
+    # ── Reconstruct row matrix (position-aligned sparse grid) ────────────────
+    # IMPORTANT: We must preserve each cell's exact column index from Docling.
+    # A naive dense extraction (just sorting by col_index and taking text) drops
+    # gap columns — e.g. "Values" at col3 that spans to col5, with "Unit" at
+    # col6, gets collapsed to positional indices 3 and 4.  After sub-header
+    # merging ("min.", "typ.", "max." at indices 3,4,5) Unit would be clobbered
+    # by "typ.", causing every typ value to appear in the Unit column.
+    #
+    # Fix: compute the full column count (max_col + 1), then build each row as
+    # a ``max_col``-wide list of empty strings and fill in cells at their exact
+    # col_index positions.
     rows_map: dict[int, list] = {}
     for c in cells:
         r = c.get("row_index", c.get("start_row_offset_idx", 0))
         rows_map.setdefault(r, []).append(c)
 
-    sorted_rows = [
-        [c.get("text", "").strip()
-         for c in sorted(rows_map[r],
-                         key=lambda x: x.get("col_index", x.get("start_col_offset_idx", 0)))]
-        for r in sorted(rows_map)
-    ]
+    if not rows_map:
+        return []
+
+    max_col = max(
+        c.get("col_index", c.get("start_col_offset_idx", 0))
+        for row_cells in rows_map.values()
+        for c in row_cells
+    )
+    grid_width = max_col + 1
+
+    sorted_rows: list[list[str]] = []
+    for r in sorted(rows_map):
+        row: list[str] = [""] * grid_width
+        for c in sorted(
+            rows_map[r],
+            key=lambda x: x.get("col_index", x.get("start_col_offset_idx", 0)),
+        ):
+            col = c.get("col_index", c.get("start_col_offset_idx", 0))
+            if col < grid_width:
+                row[col] = c.get("text", "").strip()
+        sorted_rows.append(row)
 
     if not sorted_rows:
         return []
