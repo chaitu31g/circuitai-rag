@@ -7,41 +7,35 @@ from ingestion.datasheet_chunker import _get_table_contexts, _detect_section, _S
 
 logger = logging.getLogger(__name__)
 
-def match_docling_table_with_pdftable(doc_table: dict, pdf_tables: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Find the corresponding PdfTable for a Docling table using page number and bbox overlap."""
+def match_docling_table_with_pdftable(
+    doc_table: dict, 
+    pdf_tables: List[Dict[str, Any]], 
+    docling_page_rank: int
+) -> Dict[str, Any]:
+    """
+    Match Docling tables with PdfTable tables sequentially by page.
+    Bypasses coordinate mismatch problems.
+    docling_page_rank: This is the Nth table Docling found on this page (0-indexed).
+    """
     prov = (doc_table.get("prov") or [{}])[0]
     page_no = prov.get("page_no")
-    doc_bbox = prov.get("bbox")
     
-    if not page_no or not doc_bbox:
+    if not page_no:
         return None
 
-    dl = doc_bbox.get("l", 0)
-    dt = doc_bbox.get("t", 0)
-    dr = doc_bbox.get("r", 0)
-    db = doc_bbox.get("b", 0)
+    # Get all pdfplumber tables on this exact page
+    page_pdf_tables = [pt for pt in pdf_tables if pt["page"] == page_no]
     
-    best_match = None
-    max_overlap = 0.0
+    if page_pdf_tables:
+        # Match sequentially: 1st docling table = 1st pdfplumber table
+        rank = min(docling_page_rank, len(page_pdf_tables) - 1)
+        return page_pdf_tables[rank]
 
-    for pt in pdf_tables:
-        if pt["page"] != page_no:
-            continue
-            
-        x0, top, x1, bottom = pt["bbox"]
+    # Fallback: if no tables found on exact page, match nearest by absolute page distance
+    if not pdf_tables:
+        return None
         
-        overlap_l = max(dl, x0)
-        overlap_t = max(dt, top)
-        overlap_r = min(dr, x1)
-        overlap_b = min(db, bottom)
-        
-        if overlap_r > overlap_l and overlap_b > overlap_t:
-            overlap_area = (overlap_r - overlap_l) * (overlap_b - overlap_t)
-            if overlap_area > max_overlap:
-                max_overlap = overlap_area
-                best_match = pt
-
-    return best_match
+    return min(pdf_tables, key=lambda t: abs(t["page"] - page_no))
 
 def extract_tables_hybrid(
     pdf_path: str,
@@ -52,7 +46,7 @@ def extract_tables_hybrid(
     Hybrid Pipeline:
     1. Parse Docling document structure (passed via docling_data)
     2. Extract accurate tables with PdfTable
-    3. Match Docling table to PdfTable output
+    3. Match Docling table to PdfTable output sequentially
     4. Format to structured parameter rows with Context
     5. Return chunks
     """
@@ -68,15 +62,33 @@ def extract_tables_hybrid(
     tables = docling_data.get("tables", [])
     texts = docling_data.get("texts", [])
     
+    # --- Mandatory Diagnostic Logging ---
+    logger.info(f"Docling tables: {len(tables)}")
+    logger.info(f"PdfTable tables: {len(pdf_tables)}")
+    for t in pdf_tables:
+        logger.debug(f"PdfTable table -> page: {t['page']}, rows: {len(t['data'])}")
+    
     table_contexts = _get_table_contexts(docling_data)
     
+    # Track the sequential rank of Docling tables per page
+    page_rank_counter = {}
+
     for i, tbl in enumerate(tables):
+        prov = (tbl.get("prov") or [{}])[0]
+        page = prov.get("page_no")
+        
+        # Compute docling page rank
+        if page:
+            docling_page_rank = page_rank_counter.get(page, 0)
+            page_rank_counter[page] = docling_page_rank + 1
+        else:
+            docling_page_rank = 0
+
         # Step 4: Extract Table Title & Section (Docling structure)
         ctx = table_contexts.get(i)
         if ctx:
             best_sec, table_title = ctx
         else:
-            page = (tbl.get("prov") or [{}])[0].get("page_no")
             best_sec = "electrical_characteristics"
             for t in texts:
                 t_page = (t.get("prov") or [{}])[0].get("page_no") if t.get("prov") else None
@@ -87,10 +99,11 @@ def extract_tables_hybrid(
                         break
             table_title = ""
             
-        # Step 3: Match Docling table with PdfTable
-        matched_pt = match_docling_table_with_pdftable(tbl, pdf_tables)
+        # Step 3: Match Docling table with PdfTable using page sequentially
+        matched_pt = match_docling_table_with_pdftable(tbl, pdf_tables, docling_page_rank)
+        
         if not matched_pt:
-            logger.warning(f"No PdfTable matched Docling table {i}. Falling back to standard Docling format.")
+            logger.warning(f"No PdfTable matched Docling table {i} on page {page}. Falling back to standard Docling format.")
             # Fallback to standard Docling extractor if pdfplumber missed it
             from rag_pipeline.utils.parameter_extractor import extract_parameter_rows
             fallback_chunks = extract_parameter_rows(tbl, best_sec, part_number, i + 1, table_title=table_title)
