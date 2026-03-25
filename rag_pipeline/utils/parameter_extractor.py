@@ -43,8 +43,11 @@ def _scrub_and_ffill(rows: list[list[str]]) -> list[list[str]]:
     forward-fill has no effect and the second test-condition row (e.g. 70°C)
     is dropped by the downstream "if not any(cell)" guard.
 
-    Only the first two columns (Parameter name + Symbol) are filled — all
-    other columns retain their original blanks so value cells are not smeared.
+    Columns filled forward:
+      • Column 0 (Parameter name) — always merged vertically for multi-condition rows
+      • Column 1 (Symbol) — same
+      • Last column (Unit) — Docling only sets it in the first condition row;
+        continuation rows leave it blank, causing unit to disappear from chunks.
     """
     try:
         import pandas as pd
@@ -56,15 +59,19 @@ def _scrub_and_ffill(rows: list[list[str]]) -> list[list[str]]:
         return rows
 
     df = pd.DataFrame(rows)
+    n_cols = df.shape[1]
 
-    # ── Step 1: Scrub ALL forms of empty from first two cols ──────────────────
-    # regex=True catches whitespace-only strings ("  ", "\n", "\t", etc.)
-    df.iloc[:, :2] = df.iloc[:, :2].replace(r"^\s*$", pd.NA, regex=True)
-    # Also catch Python None and literal empty string missed by regex
-    df.iloc[:, :2] = df.iloc[:, :2].replace([None, ""], pd.NA)
+    # Columns to forward-fill: first two (param, symbol) + last (unit)
+    fill_cols = list(dict.fromkeys([0, 1, n_cols - 1]))  # dedup in case ncols<=2
+
+    # ── Step 1: Scrub ALL forms of empty from fill columns ────────────────────
+    for col in fill_cols:
+        df.iloc[:, col] = df.iloc[:, col].replace(r"^\s*$", pd.NA, regex=True)
+        df.iloc[:, col] = df.iloc[:, col].replace([None, ""], pd.NA)
 
     # ── Step 2: Forward-fill blanks downward ──────────────────────────────────
-    df.iloc[:, :2] = df.iloc[:, :2].ffill(axis=0)
+    for col in fill_cols:
+        df.iloc[:, col] = df.iloc[:, col].ffill()
 
     # ── Step 3: Convert any remaining NA back to "" for downstream safety ─────
     df = df.fillna("")
