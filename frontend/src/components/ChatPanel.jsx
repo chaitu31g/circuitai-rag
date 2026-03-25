@@ -5,7 +5,7 @@ import {
   ChevronDown, ChevronUp, Cpu, Zap,
 } from 'lucide-react';
 
-const CHAT_HISTORY_STORAGE_KEY = 'circuitai_chat_history';
+const CHAT_HISTORY_STORAGE_KEY = 'circuitai_chat_session';
 const DEFAULT_ASSISTANT_MESSAGE = {
   role: 'assistant',
   content: "Hello! I'm CircuitAI. Ask me anything about the components in your knowledge base — specs, ratings, features, or pin configurations.",
@@ -34,7 +34,8 @@ function loadMessagesFromStorage() {
   if (typeof window === 'undefined') return [DEFAULT_ASSISTANT_MESSAGE];
 
   try {
-    const savedMessages = window.localStorage.getItem(CHAT_HISTORY_STORAGE_KEY);
+    // Use sessionStorage so history clears on every page refresh / new tab
+    const savedMessages = window.sessionStorage.getItem(CHAT_HISTORY_STORAGE_KEY);
     if (!savedMessages) return [DEFAULT_ASSISTANT_MESSAGE];
     return sanitizeStoredMessages(JSON.parse(savedMessages));
   } catch {
@@ -364,7 +365,8 @@ export default function ChatPanel({ components = [] }) {
   useEffect(() => {
     if (typeof window === 'undefined') return;
     try {
-      window.localStorage.setItem(CHAT_HISTORY_STORAGE_KEY, JSON.stringify(messages));
+      // Persist within the current browser session only (clears on refresh)
+      window.sessionStorage.setItem(CHAT_HISTORY_STORAGE_KEY, JSON.stringify(messages));
     } catch {
       // Ignore storage failures
     }
@@ -372,7 +374,7 @@ export default function ChatPanel({ components = [] }) {
 
   const clearChat = () => {
     if (typeof window !== 'undefined') {
-      window.localStorage.removeItem(CHAT_HISTORY_STORAGE_KEY);
+      window.sessionStorage.removeItem(CHAT_HISTORY_STORAGE_KEY);
     }
     clearInterval(elapsedRef.current);
     setMessages([DEFAULT_ASSISTANT_MESSAGE]);

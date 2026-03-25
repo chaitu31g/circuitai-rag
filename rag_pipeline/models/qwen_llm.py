@@ -321,15 +321,18 @@ def build_prompt(context: str, query: str) -> list[dict]:
         + "Step 1 — Open a <THINKING> block and complete all 4 items:\n"
         + "  1. Target Parameter: write the exact parameter name from the query.\n"
         + "  2. Rows found: list ONLY rows whose Parameter cell is a character-for-character "
-        + "match of the target.\n"
+        + "match of the target. COUNT EVERY matching row — a parameter with N test conditions "
+        + "will appear N times in the context; all N rows are required.\n"
         + "  3. Rejected rows: list every row you discard and WHY "
         + "(e.g. 'Gate-source leakage current' — REJECTED: different parameter).\n"
         + "  4. Source columns: copy the exact column headers from the <DATASHEET_TABLE> tag.\n"
         + "Step 2 — Close </THINKING>.\n"
-        + "Step 3 — Output ONLY a Markdown table containing the confirmed rows.\n"
+        + "Step 3 — Output ONLY a Markdown table containing ALL confirmed rows.\n"
         + "  - Use the EXACT source column headers (from Step 4 of your thinking).\n"
         + "  - DO NOT compress min/typ/max into a single Value column.\n"
         + "  - One test condition = one row. Never merge conditions.\n"
+        + "  - CRITICAL: Do NOT stop after outputting the first condition row. "
+        + "Continue until every matched row is written. Only then end the table.\n"
         + "  - No prose before or after the table.\n"
     )
     return [
@@ -554,7 +557,7 @@ def _filter_reasoning_steps(text: str) -> str:
 def generate_response(
     prompt: list[dict] | str,
     model_id: str = MODEL_NAME,
-    max_new_tokens: int = 600,
+    max_new_tokens: int = 1200,
     temperature: float = 0.4,
     top_p: float = 0.9,
     do_sample: bool = True,
@@ -620,7 +623,7 @@ def generate_response(
 def stream_response(
     prompt: list[dict] | str,
     model_id: str = MODEL_NAME,
-    max_new_tokens: int = 600,
+    max_new_tokens: int = 1200,
     temperature: float = 0.4,
     top_p: float = 0.9,
     do_sample: bool = True,
