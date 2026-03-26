@@ -63,20 +63,38 @@ def unmerge_multiline_row(row):
     Expands a single row with multi-line cells (e.g., "0.23\\n0.18") into multiple rows.
     """
     cells = [str(c).strip() if c is not None else "" for c in row]
-    lines_per_cell = [c.split('\n') for c in cells]
-    max_lines = max(len(lines) for lines in lines_per_cell)
     
-    if max_lines <= 1:
-        return [[c.replace('\n', ' ').strip() for c in cells]]
+    # Check max lines based ONLY on value columns (index 3 to len-2)
+    # This ensures text-wrapping in condition/parameter doesn't falsely trigger a split
+    value_lines = [len(c.split('\n')) for c in cells[3:-1] if c]
+    max_val_lines = max(value_lines) if value_lines else 1
+    
+    if max_val_lines <= 1:
+        return [[c.replace('\n', ' ').replace('  ', ' ').strip() for c in cells]]
         
     expanded = []
-    for i in range(max_lines):
+    for i in range(max_val_lines):
         new_row = []
-        for lines in lines_per_cell:
-            if i < len(lines):
-                new_row.append(lines[i].strip())
+        for col_idx, c in enumerate(cells):
+            lines = [l.strip() for l in c.split('\n')]
+            
+            # Param (0), Symbol (1), and Unit (last) are identifiers. 
+            # They mathematically span the block. NEVER split them vertically (protects against I\\nD OCR bugs).
+            if col_idx in (0, 1, len(cells)-1):
+                if i == 0:
+                    new_row.append(" ".join(l for l in lines if l))
+                else:
+                    new_row.append("")
             else:
-                new_row.append("")
+                # Cond & Values
+                if len(lines) == max_val_lines:
+                    new_row.append(lines[i])
+                else:
+                    # Line count mismatch (e.g. text wrapping, or a spanned condition)
+                    if i == 0:
+                        new_row.append(" ".join(l for l in lines if l))
+                    else:
+                        new_row.append("")
         expanded.append(new_row)
     return expanded
 
