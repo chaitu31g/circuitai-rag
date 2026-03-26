@@ -126,9 +126,9 @@ def crop_table_images(pdf_path: str, regions: List[Dict[str, Any]], dpi: int = 1
         else:
             y0, y1 = t, b
 
-        # Apply padding
-        rect = fitz.Rect(max(0, l-5), max(0, y0-5),
-                         min(page.rect.width, r+5), min(ph, y1+5))
+        # Apply padding (wider R to prevent Unit cutoff)
+        rect = fitz.Rect(max(0, l-15), max(0, y0-10),
+                         min(page.rect.width, r+15), min(ph, y1+10))
         pix  = page.get_pixmap(clip=rect, dpi=dpi)
         img  = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
 
@@ -297,8 +297,8 @@ _HEADER_KEYWORDS = {
     "unit":      "unit",
     "units":     "unit",
     "unite":     "unit",
-    "value":     "typ",   # single-value tables
-    "values":    "typ",
+    "value":     "value", # Preserve 'Value' name
+    "values":    "value",
     "note":      "condition",
 }
 
@@ -395,22 +395,26 @@ def is_section_header_row(row: List[str]) -> bool:
 # ─────────────────────────────────────────────────────────────────
 def _resolve_values(row: List[str], col_map: Dict[int, str]):
     """
-    Pull min/typ/max either from named columns or from positional val_N columns.
+    Pull min/typ/max/value from named columns.
     """
-    named = {name: "-" for name in ["min","typ","max"]}
+    named = {name: "-" for name in ["min","typ","max","value"]}
     val_cols = []
 
     for ci, name in col_map.items():
         if ci >= len(row):
             continue
         v = row[ci].strip() or "-"
-        if name in ("min","typ","max"):
+        if name in named:
             named[name] = v
         elif name.startswith("val_"):
             val_cols.append(v)
 
-    # If named columns are all "-", fall back to positional inference
-    if all(v == "-" for v in named.values()):
+    # Special case: if we have 'value' column, prefer it over positional
+    if named["value"] != "-":
+        return "-", "-", "-", named["value"]
+
+    # Positional fallback for unlabeled tables
+    if all(v == "-" for v in [named["min"], named["typ"], named["max"]]):
         actives = [v for v in val_cols if v != "-"]
         if len(actives) >= 3:
             named["min"], named["typ"], named["max"] = actives[0], actives[1], actives[2]
@@ -419,7 +423,7 @@ def _resolve_values(row: List[str], col_map: Dict[int, str]):
         elif len(actives) == 1:
             named["typ"] = actives[0]
 
-    return named["min"], named["typ"], named["max"]
+    return named["min"], named["typ"], named["max"], "-"
 
 
 def _get_cell(row: List[str], col_map: Dict[int, str], key: str) -> str:
@@ -490,18 +494,25 @@ def create_chunks(
         unit = _get_cell(cells, col_map, "unit")
         condition, unit = extract_unit(condition, unit)
 
-        min_val, typ_val, max_val = _resolve_values(cells, col_map)
+        min_val, typ_val, max_val, single_val = _resolve_values(cells, col_map)
 
         chunk_lines = [
             f"Section: {current_section}",
             f"Parameter: {param}",
             f"Symbol: {symbol}" if symbol != "-" else "",
             f"Condition: {condition}" if condition != "-" else "",
-            f"Min: {min_val}",
-            f"Typ: {typ_val}",
-            f"Max: {max_val}",
-            f"Unit: {unit}" if unit != "-" else "",
         ]
+        if single_val != "-":
+            chunk_lines.append(f"Value: {single_val}")
+        else:
+            chunk_lines.extend([
+                f"Min: {min_val}",
+                f"Typ: {typ_val}",
+                f"Max: {max_val}",
+            ])
+        if unit != "-":
+            chunk_lines.append(f"Unit: {unit}")
+            
         row_txt = "\n".join(ln for ln in chunk_lines if ln)
 
         chunks.append(Chunk(
