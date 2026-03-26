@@ -37,7 +37,7 @@ sentencepiece>=0.1.99
 
 # ── Vision / DePlot / Table Transformer ───────────────────────────────────────
 Pillow>=10.4.0
-numpy>=1.24.0,<2.0.0          # stable across tensorflow, numba, docling
+numpy>=2.0                    # Colab 2025+ requires >=2 (jax, cupy, opencv)
 timm>=0.9.0                   # Table Transformer backbone
 
 # ── LlamaIndex integrations ───────────────────────────────────────────────────

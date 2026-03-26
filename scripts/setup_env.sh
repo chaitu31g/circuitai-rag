@@ -22,7 +22,7 @@ pip install -q \
     "tokenizers>=0.13.2,<=0.20.3" \
     "huggingface-hub>=0.23,<1.0.0" \
     "typer>=0.12.5,<0.22.0" \
-    "numpy>=1.24.0,<2.0.0" \
+    "numpy>=2.0" \
     "requests==2.32.4" \
     "PyMuPDF==1.25.1"
 
@@ -60,14 +60,21 @@ checks = {
     "fitz":             None,      # PyMuPDF
     "pdfplumber":       None,
     "chromadb":         None,
-    "docling":          None,
+    "docling":          None,      # checked via importlib.metadata below
 }
 
 ok = True
 for pkg, bounds in checks.items():
     try:
         m = importlib.import_module(pkg)
-        ver = getattr(m, "__version__", "?")
+        ver = getattr(m, "__version__", None)
+        # Fallback for packages like docling that use importlib.metadata
+        if ver is None or ver == "?":
+            import importlib.metadata as meta
+            try:
+                ver = meta.version(pkg)
+            except Exception:
+                ver = "installed"
         if bounds:
             from packaging.version import Version
             lo, hi = bounds
