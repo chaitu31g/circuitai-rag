@@ -16,15 +16,22 @@
 set -e
 
 echo ""
+echo "━━━ Step 0: Purge legacy OCR packages ━━━"
+pip uninstall -y paddleocr paddlex easyocr || true
+
+echo ""
 echo "━━━ Step 1: Pin conflict-sensitive packages ━━━"
 pip install -q \
     "transformers>=4.42.0,<5.0.0" \
     "tokenizers>=0.13.2,<=0.20.3" \
     "huggingface-hub>=0.23,<1.0.0" \
     "typer>=0.12.5,<0.22.0" \
-    "numpy>=2.0" \
+    "numpy>=1.26.0,<2.1.0" \
     "requests==2.32.4" \
-    "PyMuPDF==1.25.1"
+    "PyMuPDF==1.25.1" \
+    "rich<14.0.0" \
+    "fsspec==2025.3.0" \
+    "PyYAML==6.0.2"
 
 echo ""
 echo "━━━ Step 2: Install main requirements (no-deps to protect pins) ━━━"
@@ -57,6 +64,7 @@ checks = {
     "transformers":     ("4.42", "5.0"),
     "tokenizers":       ("0.13", "0.21"),
     "huggingface_hub":  ("0.23", "1.0"),
+    "numpy":            ("1.26", "2.1"),
     "fitz":             None,      # PyMuPDF
     "pdfplumber":       None,
     "chromadb":         None,
