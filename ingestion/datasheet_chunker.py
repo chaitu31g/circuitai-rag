@@ -581,11 +581,16 @@ def chunk_document(
                 "features": 10, "description": 8, "applications": 7,
                 "electrical_characteristics": 9, "absolute_maximum_ratings": 9,
             }.get(detected, 3))
+            
             if len(txt) >= MIN_CHUNK_LENGTH and detected not in _SKIP_TYPES:
                 sections.setdefault(detected, []).insert(0, txt)
+                seen_raws.add(txt)
             continue
 
+        # Only skip the specific text block if it's in a skip section, 
+        # but don't skip the whole flow.
         if current_section in _SKIP_TYPES:
+            seen_raws.add(txt) # mark as 'seen' so it doesn't leak into coverage windows either
             continue
 
         sections.setdefault(current_section, []).append(txt)
