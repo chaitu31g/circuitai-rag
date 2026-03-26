@@ -1,121 +1,171 @@
-import logging
+import os
 import re
+import logging
 from typing import List, Dict, Any
+from bs4 import BeautifulSoup
+import fitz  # PyMuPDF
 
-from rag_pipeline.parsers.pdftable import PdfTable
-from ingestion.datasheet_chunker import _get_table_contexts, _detect_section, _SKIP_TYPES, Chunk
+from ingestion.datasheet_chunker import Chunk, _detect_section, _SKIP_TYPES
+
+# Initialize PaddleOCR PPStructure in CPU mode to avoid strict GPU dependencies
+try:
+    from paddleocr import PPStructure
+    table_engine = PPStructure(layout=False, show_log=False, table=True, use_gpu=False)
+except ImportError:
+    table_engine = None
 
 logger = logging.getLogger(__name__)
 
-def match_docling_table_with_pdftable(
-    doc_table: dict, 
-    pdf_tables: List[Dict[str, Any]], 
-    docling_page_rank: int
-) -> Dict[str, Any]:
-    """
-    Match Docling tables with PdfTable tables sequentially by page.
-    Bypasses coordinate mismatch problems.
-    docling_page_rank: This is the Nth table Docling found on this page (0-indexed).
-    """
-    prov = (doc_table.get("prov") or [{}])[0]
-    page_no = prov.get("page_no")
+# ---------------------------------------------------------
+# 1. TABLE REGION EXTRACTION
+# ---------------------------------------------------------
+def extract_table_regions(docling_data: dict) -> List[Dict[str, Any]]:
+    """Extracts bounding boxes and page numbers for tables detected by Docling."""
+    tables = docling_data.get("tables", [])
+    texts = docling_data.get("texts", [])
+    regions = []
     
-    if not page_no:
-        return None
-
-    # Get all pdfplumber tables on this exact page
-    page_pdf_tables = [pt for pt in pdf_tables if pt["page"] == page_no]
-    
-    if page_pdf_tables:
-        # Match sequentially: 1st docling table = 1st pdfplumber table
-        rank = min(docling_page_rank, len(page_pdf_tables) - 1)
-        return page_pdf_tables[rank]
-
-    # Fallback: if no tables found on exact page, match nearest by absolute page distance
-    if not pdf_tables:
-        return None
+    for i, tbl in enumerate(tables):
+        prov = (tbl.get("prov") or [{}])[0]
+        page_no = prov.get("page_no")
+        bbox = prov.get("bbox")
         
-    return min(pdf_tables, key=lambda t: abs(t["page"] - page_no))
-
-def is_section_header_row(row):
-    """
-    Detect non-data rows such as section headers (e.g., 'Dynamic characteristics').
-    Usually, it's a row where only the first column has text, and no numbers.
-    """
-    if not row:
-        return False
-    cells = [str(cell).strip() for cell in row if cell is not None]
-    if len(cells) == 0:
-        return False
-        
-    has_text = len(cells[0]) > 0
-    others_empty = all(len(c) == 0 or c == "-" for c in cells[1:])
-    has_number = any(any(char.isdigit() for char in cell) for cell in cells)
-    
-    # If there are no numbers and only the first cell has text, it's a section header
-    if has_text and others_empty and not has_number:
-        return True
-        
-    return False
-
-def unmerge_multiline_row(row):
-    """
-    Expands a single row with multi-line cells (e.g., "0.23\\n0.18") into multiple rows.
-    """
-    cells = [str(c).strip() if c is not None else "" for c in row]
-    
-    # Check max lines based ONLY on value columns (index 3 to len-2)
-    # This ensures text-wrapping in condition/parameter doesn't falsely trigger a split
-    value_lines = [len(c.split('\n')) for c in cells[3:-1] if c]
-    max_val_lines = max(value_lines) if value_lines else 1
-    
-    if max_val_lines <= 1:
-        return [[c.replace('\n', ' ').replace('  ', ' ').strip() for c in cells]]
-        
-    expanded = []
-    for i in range(max_val_lines):
-        new_row = []
-        for col_idx, c in enumerate(cells):
-            lines = [l.strip() for l in c.split('\n')]
+        if not page_no or not bbox:
+            continue
             
-            # Param (0), Symbol (1), and Unit (last) are identifiers. 
-            # They mathematically span the block. NEVER split them vertically (protects against I\\nD OCR bugs).
-            if col_idx in (0, 1, len(cells)-1):
-                if i == 0:
-                    new_row.append(" ".join(l for l in lines if l))
-                else:
-                    new_row.append("")
-            else:
-                # Cond & Values
-                if len(lines) == max_val_lines:
-                    new_row.append(lines[i])
-                else:
-                    # Line count mismatch (e.g. text wrapping, or a spanned condition)
-                    if i == 0:
-                        new_row.append(" ".join(l for l in lines if l))
-                    else:
-                        new_row.append("")
-        expanded.append(new_row)
-    return expanded
+        # Standardize bbox format regardless of Docling JSON changes (dict vs list)
+        if isinstance(bbox, dict):
+            valid_bbox = [bbox.get("l", 0), bbox.get("t", 0), bbox.get("r", 0), bbox.get("b", 0)]
+            is_dict = True
+        else:
+            valid_bbox = bbox[:4]
+            is_dict = False
+            
+        # Infer section cleanly from Docling texts
+        best_sec = "electrical_characteristics"
+        for t in texts:
+            t_page = (t.get("prov") or [{}])[0].get("page_no")
+            if t_page == page_no:
+                d = _detect_section(t.get("text", ""))
+                if d and d not in _SKIP_TYPES:
+                    best_sec = d
+                    break
+                    
+        regions.append({
+            "table_index": i,
+            "page_no": page_no,
+            "bbox": valid_bbox,
+            "docling_origin_bottom": is_dict, # heuristic flag to invert Y axis
+            "docling_tbl": tbl,
+            "section": best_sec
+        })
+        
+    return regions
 
-def clean_condition(text):
+# ---------------------------------------------------------
+# 2. CROP TABLE IMAGES
+# ---------------------------------------------------------
+def crop_table_images(pdf_path: str, regions: List[Dict[str, Any]], output_dir="/tmp/tables") -> List[Dict[str, Any]]:
+    """Uses PyMuPDF to extract high-DPI images of tables based on Docling bounding boxes."""
+    os.makedirs(output_dir, exist_ok=True)
+    doc = fitz.open(pdf_path)
+    
+    for region in regions:
+        page_num = region["page_no"] - 1  # fitz uses 0-based indexing
+        if page_num < 0 or page_num >= doc.page_count:
+            continue
+            
+        page = doc.load_page(page_num)
+        l, t, r, b = region["bbox"]
+        
+        # If Docling coords are Cartesian bottom-left, invert Y to fitz top-left:
+        page_height = page.rect.height
+        if region["docling_origin_bottom"] and t > b: # Sanity check for inversion
+            y0, y1 = page_height - t, page_height - b
+        else:
+            y0, y1 = t, b
+            
+        # Give a small padding (5pts) to ensure table borders aren't clipped
+        rect = fitz.Rect(max(0, l - 5), max(0, y0 - 5), min(page.rect.width, r + 5), min(page_height, y1 + 5))
+        
+        # Extract image at 300 DPI for highly accurate OCR
+        pix = page.get_pixmap(clip=rect, dpi=300)
+        img_path = os.path.join(output_dir, f"table_p{region['page_no']}_{region['table_index']}.png")
+        pix.save(img_path)
+        region["image_path"] = img_path
+        
+    doc.close()
+    return regions
+
+# ---------------------------------------------------------
+# 3. PADDLEOCR TABLE EXTRACTION & HTML PARSING
+# ---------------------------------------------------------
+def run_paddle_table(image_path: str) -> str:
+    """Sends the cropped table image through PPStructure and extracts HTML."""
+    if not table_engine:
+        logger.warning("PaddleOCR not installed or initialized. Bypassing PPStructure.")
+        return ""
+        
+    import cv2
+    img = cv2.imread(image_path)
+    if img is None:
+        return ""
+        
+    result = table_engine(img)
+    for res in result:
+        if res['type'] == 'table':
+            return res['res']['html']
+    return ""
+
+def parse_html_table(html_str: str) -> List[List[str]]:
+    """Converts PPStructure HTML into a clean Python list-of-lists matrix."""
+    if not html_str:
+        return []
+        
+    soup = BeautifulSoup(html_str, 'html.parser')
+    rows = []
+    
+    # PPStructure outputs clean <td> and <tr> tags and often duplicates span content
+    # natively. We extract the raw text for downstream structuring.
+    for tr in soup.find_all('tr'):
+        row = [cell.get_text(separator=' ', strip=True) for cell in tr.find_all(['td', 'th'])]
+        if any(row):  # Filter completely empty parsed rows
+            rows.append(row)
+            
+    return rows
+
+# ---------------------------------------------------------
+# 4. SYMBOL & TEXT CLEANING
+# ---------------------------------------------------------
+def clean_condition(text: str) -> str:
+    """Fixes broken spacing, OCR detached subscripts, and normalizes test conditions."""
     if not text or text == "-":
         return "-"
+    
+    # Target exact OCR garbage from known failures
     text = text.replace("V =60 V, DS V =0 V", "Vds=60V, Vgs=0V")
+    
+    # Generic fixes for detached subscripts 
     text = re.sub(r'V\s*=\s*([-\d.]+)\s*V,\s*DS', r'Vds=\1V', text)
     text = re.sub(r'V\s*=\s*([-\d.]+)\s*V,\s*GS', r'Vgs=\1V', text)
+    
+    # Space reduction around operators and units (e.g. 25 V -> 25V)
     text = re.sub(r'\s*=\s*', '=', text)
     text = re.sub(r'(?<=\d)\s+([A-Za-z]+)', r'\1', text)
-    # clean weird characters like j or nm at end
+    
+    # Drop orphaned floating characters (like "j" from Tj)
     text = re.sub(r'\s+[A-Za-z]$', '', text)
     return text.strip()
 
-def normalize_symbol(symbol):
+def normalize_symbol(symbol: str) -> str:
+    """Heals shredded technical symbols like 'C oss' -> 'Coss'."""
     if not symbol or symbol == "-":
         return "-"
     return symbol.replace(" ", "")
 
-def extract_unit(condition, current_unit):
+def extract_unit(condition: str, current_unit: str) -> tuple[str, str]:
+    """If Paddle merged the unit into the condition column, amputates it cleanly."""
+    # Matches a unit token at the absolute end of the string, prefixed by a space
     unit_pattern = r'\s+(pF|nF|uF|F|ns|us|ms|s|MHz|kHz|Hz|mV|V|mA|uA|A|mW|W|mOhm|Ohm|Ω|mΩ|°C)$'
     match = re.search(unit_pattern, condition, flags=re.IGNORECASE)
     if match:
@@ -125,327 +175,167 @@ def extract_unit(condition, current_unit):
             current_unit = extracted
     return condition, current_unit
 
+def is_section_header_row(row: List[str]) -> bool:
+    """Detects rows behaving as grouped metadata headers."""
+    if not row: return False
+    cells = [str(c).strip() if c else "-" for c in row]
+    has_text = len(cells[0]) > 0 and cells[0] != "-"
+    others_empty = all(c == "-" for c in cells[1:])
+    has_number = any(any(char.isdigit() for char in cell) for cell in cells)
+    
+    return has_text and others_empty and not has_number
 
-def extract_tables_hybrid(
-    pdf_path: str,
-    docling_data: dict,
-    part_number: str
-) -> List[Chunk]:
+# ---------------------------------------------------------
+# 5. COLUMN MAPPING & MULTI-ROW CONDITIONS (Structured Output)
+# ---------------------------------------------------------
+def clean_and_map_columns(rows: List[List[str]], default_section: str) -> List[Dict[str, Any]]:
     """
-    Hybrid Pipeline:
-    1. Parse Docling document structure (passed via docling_data)
-    2. Extract accurate tables with PdfTable
-    3. Match Docling table to PdfTable output sequentially
-    4. Format to structured parameter rows with Context
-    5. Return chunks
+    Transforms the raw PaddleHTML grid into guaranteed semantic objects.
     """
-    logger.info(f"Extracting tables with hybrid PdfTable parser for {part_number}")
-    all_chunks: List[Chunk] = []
+    structured_rows = []
+    last_condition = "-"
+    current_section = default_section.replace('_', ' ').title()
     
-    try:
-        pdf_tables = PdfTable().extract(pdf_path)
-    except Exception as e:
-        logger.error(f"Hybrid table extraction failed: {e}. Falling back to standard docling tables.")
-        raise
-
-    tables = docling_data.get("tables", [])
-    texts = docling_data.get("texts", [])
-    
-    # --- Mandatory Diagnostic Logging ---
-    logger.info(f"Docling tables: {len(tables)}")
-    logger.info(f"PdfTable tables: {len(pdf_tables)}")
-    for t in pdf_tables:
-        logger.debug(f"PdfTable table -> page: {t['page']}, rows: {len(t['data'])}")
-    
-    table_contexts = _get_table_contexts(docling_data)
-    
-    # Track the sequential rank of Docling tables per page
-    page_rank_counter = {}
-    processed_pdf_tables = set()
-
-    for i, tbl in enumerate(tables):
-        prov = (tbl.get("prov") or [{}])[0]
-        page = prov.get("page_no")
-        
-        # Compute docling page rank
-        if page:
-            docling_page_rank = page_rank_counter.get(page, 0)
-            page_rank_counter[page] = docling_page_rank + 1
-        else:
-            docling_page_rank = 0
-
-        # Step 4: Extract Table Title & Section (Docling structure)
-        ctx = table_contexts.get(i)
-        if ctx:
-            best_sec, table_title = ctx
-        else:
-            best_sec = "electrical_characteristics"
-            for t in texts:
-                t_page = (t.get("prov") or [{}])[0].get("page_no") if t.get("prov") else None
-                if t_page == page:
-                    d = _detect_section(t.get("text", ""))
-                    if d and d not in _SKIP_TYPES:
-                        best_sec = d
-                        break
-            table_title = ""
-            
-        # Step 3: Match Docling table with PdfTable using page sequentially
-        matched_pt = match_docling_table_with_pdftable(tbl, pdf_tables, docling_page_rank)
-        
-        if matched_pt:
-            processed_pdf_tables.add(id(matched_pt))
-        
-        if not matched_pt:
-            logger.warning(f"No PdfTable matched Docling table {i} on page {page}. Falling back to standard Docling format.")
-            # Fallback to standard Docling extractor if pdfplumber missed it
-            from rag_pipeline.utils.parameter_extractor import extract_parameter_rows
-            fallback_chunks = extract_parameter_rows(tbl, best_sec, part_number, i + 1, table_title=table_title)
-            all_chunks.extend(fallback_chunks)
+    for r in rows[1:]:
+        row = [str(x).strip() if str(x).strip() else "-" for x in r]
+        if not row or all(x == "-" for x in row):
             continue
             
-        try:
-            data = matched_pt["data"]
-            
-            if not data or len(data) < 2:
-                continue
-                
-            headers = [str(c).replace('\n', ' ').strip() if c is not None else "" for c in data[0]]
-            
-            clean_rows = []
-            for row in data[1:]:
-                # Expand multiline cells
-                expanded = unmerge_multiline_row(row)
-                clean_rows.extend(expanded)
-                    
-            if not clean_rows:
-                continue
-                
-            from rag_pipeline.utils.parameter_extractor import _scrub_and_ffill
-            
-            rows_to_process = clean_rows
-            
-            # Repair the grid holes via pandas forward fill
-            # BUT we strictly avoid forward-filling the condition indefinitely 
-            # if we can handle it at chunking time. _scrub_and_ffill still handles param/symbol merges.
-            rows_to_process = _scrub_and_ffill(rows_to_process, headers)
-            
-        except Exception as e:
-            logger.warning(f"Failed to process matched PdfTable: {e}. Falling back to docling.")
-            from rag_pipeline.utils.parameter_extractor import extract_parameter_rows
-            fallback_chunks = extract_parameter_rows(tbl, best_sec, part_number, i + 1, table_title=table_title)
-            all_chunks.extend(fallback_chunks)
+        if is_section_header_row(row):
+            current_section = row[0]
+            last_condition = "-"
             continue
+            
+        if len(row) < 4:
+            continue
+            
+        param = row[0]
+        if param == "-":
+            param = "Unknown"
+            
+        symbol = normalize_symbol(row[1])
+        condition = row[2]
+        unit = row[-1]
         
-        # Build Standard table_markdown chunk for visual LLM grounding
-        from rag_pipeline.utils.parameter_extractor import _rows_to_markdown
-        markdown_str = _rows_to_markdown(headers, rows_to_process)
-        table_preamble = (
-            f"Table {i+1}: {best_sec.replace('_', ' ').title()} data for {part_number}.\n"
-            f"This is a strictly generated markdown representation.\n"
-        )
-        md_text = table_preamble + f"<DATASHEET_TABLE>\n{markdown_str}\n</DATASHEET_TABLE>"
+        # Propagate conditionally
+        if condition == "-":
+            condition = last_condition
+        else:
+            condition = clean_condition(condition)
+            last_condition = condition
+            
+        condition, unit = extract_unit(condition, unit)
         
-        all_chunks.append(Chunk(
-            text=md_text,
-            chunk_type="table",
+        val_columns = row[3:-1]
+        active_vals = [v for v in val_columns if v != "-"]
+        
+        min_val, typ_val, max_val = "-", "-", "-"
+        if len(active_vals) >= 3:
+            min_val, typ_val, max_val = active_vals[-3], active_vals[-2], active_vals[-1]
+        elif len(active_vals) == 2:
+            typ_val, max_val = active_vals[0], active_vals[1]
+        elif len(active_vals) == 1:
+            typ_val = active_vals[0]
+            
+        structured_rows.append({
+            "section": current_section,
+            "parameter": param,
+            "symbol": symbol,
+            "condition": condition,
+            "min": min_val,
+            "typ": typ_val,
+            "max": max_val,
+            "unit": unit
+        })
+        
+    return structured_rows
+
+# ---------------------------------------------------------
+# 8. CHUNK GENERATION
+# ---------------------------------------------------------
+def create_chunks(structured_rows: List[Dict[str, Any]], part_number: str, metadata: dict = None) -> List[Chunk]:
+    """Generates the structured Chunk components for vector insertion."""
+    meta = metadata or {}
+    chunks = []
+    
+    for row in structured_rows:
+        chunk_lines = []
+        if meta.get("page"):
+            chunk_lines.append(f"Page: {meta['page']}")
+            
+        chunk_lines.extend([
+            f"Section: {row['section']}",
+            f"Parameter: {row['parameter']}",
+            f"Symbol: {row['symbol']}",
+            f"Condition: {row['condition']}",
+            f"Min: {row['min']}",
+            f"Typ: {row['typ']}",
+            f"Max: {row['max']}",
+            f"Unit: {row['unit']}"
+        ])
+        
+        row_txt = "\n".join(ln for ln in chunk_lines if ln)
+        chunks.append(Chunk(
+            text=row_txt,
+            chunk_type="parameter_row",
             metadata={
-                "type": "table_markdown",
-                "chunk_type": "table_markdown",
+                "type": "table_row",
+                "chunk_type": "parameter_row", 
                 "part_number": part_number,
-                "section": best_sec,
-                "table_name": table_title,
-                "table_number": i + 1,
-                "page": matched_pt["page"]
+                "section": row['section'],
+                "page": meta.get("page"),
+                "parameter": row['parameter']
             }
         ))
         
-        # Create highly structured parameter rows
-        last_condition = "-"
-        current_section = best_sec.replace('_', ' ').title()
-        
-        for row_idx, r in enumerate(rows_to_process):
-            row = [str(x).strip() if x is not None and str(x).strip() != "" else "-" for x in r]
-            
-            if not row or all(x == "-" for x in row):
-                continue
-                
-            if is_section_header_row(row):
-                current_section = row[0]
-                last_condition = "-"  # Boundary reset
-                continue
-                
-            if len(row) < 4:
-                continue
-                
-            param_val = row[0] if row[0] != "-" else "Unknown"
-            symbol_val = normalize_symbol(row[1])
-            
-            condition = row[2]
-            if condition == "-":
-                condition = last_condition
-            else:
-                condition = clean_condition(condition)
-                last_condition = condition
-                
-            unit_val = row[-1]
-            condition, unit_val = extract_unit(condition, unit_val)
-            
-            # Extract active non-empty value columns
-            val_columns = row[3:-1]
-            active_vals = [v for v in val_columns if v != "-"]
-            
-            min_val, typ_val, max_val = "-", "-", "-"
-            if len(active_vals) >= 3:
-                min_val, typ_val, max_val = active_vals[0], active_vals[1], active_vals[2]
-            elif len(active_vals) == 2:
-                typ_val, max_val = active_vals[0], active_vals[1]
-            elif len(active_vals) == 1:
-                typ_val = active_vals[0]
-                
-            chunk_lines = [
-                f"Section: {current_section}",
-                f"Table: {table_title}" if table_title else "",
-                f"Parameter: {param_val}",
-                f"Symbol: {symbol_val}" if symbol_val != "-" else "",
-                f"Condition: {condition}" if condition != "-" else "",
-                f"Min: {min_val}",
-                f"Typ: {typ_val}",
-                f"Max: {max_val}",
-                f"Unit: {unit_val}" if unit_val != "-" else ""
-            ]
-            
-            row_txt = "\n".join(ln for ln in chunk_lines if ln)
-            
-            all_chunks.append(Chunk(
-                text=row_txt,
-                chunk_type="parameter_row",
-                metadata={
-                    "type": "table_row",
-                    "chunk_type": "parameter_row", 
-                    "part_number": part_number,
-                    "section": best_sec,
-                    "table_name": table_title,
-                    "table_number": i + 1,
-                    "page": matched_pt["page"],
-                    "parameter": param_val
-                }
-            ))
+    return chunks
 
-    # --- PROCESS UNMATCHED PDFTABLES (Fragmentation Safeguard) ---
-    # Docling often merges tables, leaving subsequent PdfPlumber fragments orphaned.
-    for pt in pdf_tables:
-        if id(pt) in processed_pdf_tables:
+# ---------------------------------------------------------
+# 9. FALLBACK LOGIC / ORCHESTRATOR
+# ---------------------------------------------------------
+def extract_tables_hybrid(pdf_path: str, docling_data: dict, part_number: str) -> List[Chunk]:
+    """
+    Main runtime entrypoint. Connects PyMuPDF, PPStructure, and the semantic parser.
+    """
+    all_chunks = []
+    regions = extract_table_regions(docling_data)
+    regions = crop_table_images(pdf_path, regions)
+    
+    for region in regions:
+        if "image_path" not in region:
             continue
             
         try:
-            data = pt["data"]
-            if not data or len(data) < 2:
-                continue
-                
-            headers = [str(c).replace('\n', ' ').strip() if c is not None else "" for c in data[0]]
-            clean_rows = []
-            for row in data[1:]:
-                expanded = unmerge_multiline_row(row)
-                clean_rows.extend(expanded)
-                
-            if not clean_rows:
-                continue
-                
-            from rag_pipeline.utils.parameter_extractor import _scrub_and_ffill
-            rows_to_process = _scrub_and_ffill(clean_rows, headers)
+            # Run Paddle
+            html_table = run_paddle_table(region["image_path"])
             
-            # Use basic metadata for orphaned tables
-            best_sec = "electrical_characteristics"
-            table_title = ""
-            current_section = best_sec.replace('_', ' ').title()
-            last_condition = "-"
-            
-            # Simple heuristic: inherit section from latest Docling text on that page above bbox
-            page_texts = [
-                t for t in texts 
-                if (t.get("prov") or [{}])[0].get("page_no") == pt["page"]
-            ]
-            pt_top = pt.get("bbox", [0, 0, 0, 0])[1]
-            valid_texts = []
-            for t in page_texts:
-                t_bbox = (t.get("prov") or [{}])[0].get("bbox", {})
-                if isinstance(t_bbox, dict):
-                    # Docling coord system varies. To avoid complex A4 geometry math,
-                    # we just add the text. `reversed(valid_texts)` will find highest section.
-                    valid_texts.append(t)
-                else:
-                    if len(t_bbox) > 3 and t_bbox[3] < pt_top:  # text is above table
-                        valid_texts.append(t)
-            
-            # Check backwards for the nearest section header
-            for t in reversed(valid_texts):
-                d = _detect_section(t.get("text", ""))
-                if d and d not in _SKIP_TYPES:
-                    best_sec = d
-                    current_section = best_sec.replace('_', ' ').title()
-                    break
-
-            for row_idx, r in enumerate(rows_to_process):
-                row = [str(x).strip() if x is not None and str(x).strip() != "" else "-" for x in r]
-                if not row or all(x == "-" for x in row):
-                    continue
-                if is_section_header_row(row):
-                    current_section = row[0]
-                    last_condition = "-"
-                    continue
-                if len(row) < 4:
-                    continue
-                    
-                param_val = row[0] if row[0] != "-" else "Unknown"
-                symbol_val = normalize_symbol(row[1])
+            # Parse structure if successful
+            if html_table:
+                raw_rows = parse_html_table(html_table)
+                structured_rows = clean_and_map_columns(raw_rows, region["section"])
+                metadata = {
+                    "page": region.get("page_no"),
+                    "type": "table"
+                }
+                chunks = create_chunks(structured_rows, part_number, metadata)
+                all_chunks.extend(chunks)
+            else:
+                # 9. FALLBACK TO NATIVE DOCLING
+                logger.warning(f"PaddleOCR HTML empty for Table {region['table_index']}. Fallback to Docling extraction.")
+                from rag_pipeline.utils.parameter_extractor import extract_parameter_rows
                 
-                condition = row[2]
-                if condition == "-":
-                    condition = last_condition
-                else:
-                    condition = clean_condition(condition)
-                    last_condition = condition
-                    
-                unit_val = row[-1]
-                condition, unit_val = extract_unit(condition, unit_val)
+                # We add +1 to table index for UI 1-based consistency in metadata
+                fallback_chunks = extract_parameter_rows(
+                    region["docling_tbl"], 
+                    region["section"], 
+                    part_number, 
+                    region["table_index"] + 1,
+                    table_title=""
+                )
+                all_chunks.extend(fallback_chunks)
                 
-                val_columns = row[3:-1]
-                active_vals = [v for v in val_columns if v != "-"]
-                
-                min_val, typ_val, max_val = "-", "-", "-"
-                if len(active_vals) >= 3:
-                    min_val, typ_val, max_val = active_vals[0], active_vals[1], active_vals[2]
-                elif len(active_vals) == 2:
-                    typ_val, max_val = active_vals[0], active_vals[1]
-                elif len(active_vals) == 1:
-                    typ_val = active_vals[0]
-                    
-                chunk_lines = [
-                    f"Section: {current_section}",
-                    f"Parameter: {param_val}",
-                    f"Symbol: {symbol_val}" if symbol_val != "-" else "",
-                    f"Condition: {condition}" if condition != "-" else "",
-                    f"Min: {min_val}",
-                    f"Typ: {typ_val}",
-                    f"Max: {max_val}",
-                    f"Unit: {unit_val}" if unit_val != "-" else ""
-                ]
-                row_txt = "\n".join(ln for ln in chunk_lines if ln)
-                
-                all_chunks.append(Chunk(
-                    text=row_txt,
-                    chunk_type="parameter_row",
-                    metadata={
-                        "type": "table_row",
-                        "chunk_type": "parameter_row", 
-                        "part_number": part_number,
-                        "section": best_sec,
-                        "page": pt["page"],
-                        "parameter": param_val
-                    }
-                ))
         except Exception as e:
-            logger.warning(f"Failed to process orphaned PdfTable: {e}")
+            logger.error(f"Failed extracting table via paddle hybrid: {e}")
             continue
-
+            
     return all_chunks
