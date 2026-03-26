@@ -36,13 +36,14 @@ _model: Optional[TableTransformerForObjectDetection] = None
 def _get_model() -> Tuple[AutoImageProcessor, TableTransformerForObjectDetection]:
     global _processor, _model
     if _model is None:
-        logger.info("Loading Microsoft Table Transformer (structure recognition)…")
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        logger.info(f"Loading Microsoft Table Transformer on {device}…")
         _processor = AutoImageProcessor.from_pretrained(
             "microsoft/table-transformer-structure-recognition"
         )
         _model = TableTransformerForObjectDetection.from_pretrained(
             "microsoft/table-transformer-structure-recognition"
-        )
+        ).to(device)
         _model.eval()
         logger.info("Table Transformer loaded ✓")
     return _processor, _model
@@ -149,7 +150,9 @@ def detect_table_structure(image: Image.Image, threshold: float = 0.5) -> Dict[s
     normalised [x0,y0,x1,y1] box in IMAGE pixel space.
     """
     processor, model = _get_model()
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     inputs  = processor(images=image, return_tensors="pt")
+    inputs  = {k: v.to(device) for k, v in inputs.items()}
     W, H    = image.size
 
     with torch.no_grad():
@@ -266,8 +269,10 @@ _HEADER_KEYWORDS = {
     "max.":      "max",
     "unit":      "unit",
     "units":     "unit",
+    "unite":     "unit",
     "value":     "typ",   # single-value tables
     "values":    "typ",
+    "note":      "condition",
 }
 
 def map_columns(header_row: List[str]) -> Dict[int, str]:
