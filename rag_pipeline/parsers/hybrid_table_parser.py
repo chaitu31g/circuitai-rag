@@ -368,9 +368,14 @@ def extract_tables_hybrid(
             pt_top = pt.get("bbox", [0, 0, 0, 0])[1]
             valid_texts = []
             for t in page_texts:
-                t_bbox = (t.get("prov") or [{}])[0].get("bbox", [0, 0, 0, 0])
-                if t_bbox[3] < pt_top:  # text is above table
+                t_bbox = (t.get("prov") or [{}])[0].get("bbox", {})
+                if isinstance(t_bbox, dict):
+                    # Docling coord system varies. To avoid complex A4 geometry math,
+                    # we just add the text. `reversed(valid_texts)` will find highest section.
                     valid_texts.append(t)
+                else:
+                    if len(t_bbox) > 3 and t_bbox[3] < pt_top:  # text is above table
+                        valid_texts.append(t)
             
             # Check backwards for the nearest section header
             for t in reversed(valid_texts):
