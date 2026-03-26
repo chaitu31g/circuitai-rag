@@ -234,7 +234,7 @@ def assign_words_to_cells(
     grid: List[List[List[str]]] = [[[] for _ in range(n_cols)] for _ in range(n_rows)]
 
     for word in words:
-        best_r, best_c, best_area = 0, 0, -1.0
+        best_r, best_c, best_area = 0, 0, -0.01
         for ri, row_box in enumerate(rows):
             for ci, col_box in enumerate(columns):
                 area = _overlap_area(word, row_box, col_box)
@@ -242,9 +242,29 @@ def assign_words_to_cells(
                     best_area = area
                     best_r, best_c = ri, ci
         if best_area > 0:
-            grid[best_r][best_c].append(word["text"])
+            grid[best_r][best_c].append(word)
 
-    return [[" ".join(cell) for cell in row] for row in grid]
+    # Within each cell, sort words spatially (reading order) and join intelligently
+    def _join_cell_words(word_list: List[Dict]) -> str:
+        if not word_list: return "-"
+        # Sort primarily by Y (line by line) then X
+        word_list = sorted(word_list, key=lambda w: (round(w["top"],0), w["x0"]))
+        
+        text_out = ""
+        for i, w in enumerate(word_list):
+            curr_text = w["text"]
+            if i > 0:
+                prev = word_list[i-1]
+                # If this word is significantly higher than previous but overlapping in X, it's an exponent
+                if (prev["top"] - w["top"]) > 2 and _overlap_1d(prev["x0"], prev["x1"], w["x0"], w["x1"]) > 0:
+                    text_out += "^" + curr_text
+                else:
+                    text_out += " " + curr_text
+            else:
+                text_out = curr_text
+        return text_out
+
+    return [[_join_cell_words(cell) for cell in row] for row in grid]
 
 
 def build_table_grid(words, structure) -> List[List[str]]:
@@ -313,13 +333,15 @@ def clean_text(text: str) -> str:
     text = re.sub(r'\bV\s+DS',       'VDS',     text)
     text = re.sub(r'\bI\s+D\b',      'ID',      text)
 
-    # Condition normalisation  "V =60 V, DS …"  →  "Vds=60V"
-    text = text.replace("V =60 V, DS V =0 V", "Vds=60V, Vgs=0V")
-    text = re.sub(r'V\s*=\s*([\d.]+)\s*V,\s*DS', r'Vds=\1V', text)
-    text = re.sub(r'V\s*=\s*([\d.]+)\s*V,\s*GS', r'Vgs=\1V', text)
-    text = re.sub(r'\s*=\s*', '=', text)
-    text = re.sub(r'(?<=\d)\s+([A-Za-zΩµ°]+)', r'\1', text)
-    text = re.sub(r'\s+[A-Za-z]$', '', text)
+    # Scientific notation 10 0 -> 10^0
+    text = re.sub(r'\b10\s+(\d)\b', r'10^\1', text)
+    
+    # Merged units
+    text = re.sub(r'\bCpF\b', 'pF', text)
+    text = re.sub(r'\bV_DSV\b', 'Vds', text)
+    text = re.sub(r'([a-zA-Z])(\d)', r'\1 \2', text) # Split e.g. T25 -> T 25
+    text = text.replace("V _GS=0 V", "Vgs=0V")
+    
     return text.strip() or "-"
 
 
@@ -425,6 +447,12 @@ def create_chunks(
         if param == "-":
             param = "Unknown"
         symbol = normalize_symbol(_get_cell(cells, col_map, "symbol"))
+        
+        # Correction for parameter name drift
+        if symbol in ("Ciss", "Coss", "Crss", "C") and "current" in param.lower():
+            param = "Capacitance"
+        elif symbol in ("ID", "Id") and "capacitance" in param.lower():
+            param = "Continuous drain current"
 
         cond_raw = _get_cell(cells, col_map, "condition")
         if cond_raw == "-":
