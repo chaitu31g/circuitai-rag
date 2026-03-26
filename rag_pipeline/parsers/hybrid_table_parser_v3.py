@@ -107,7 +107,7 @@ def extract_table_regions(docling_data: dict) -> List[Dict[str, Any]]:
 def crop_table_images(pdf_path: str, regions: List[Dict[str, Any]], dpi: int = 150) -> List[Dict[str, Any]]:
     """
     Attach a PIL Image to every region dict.
-    `dpi=150` is fast enough for structure detection (no raw OCR needed).
+    `dpi=300` provides high resolution for thin column lines.
     """
     doc = fitz.open(pdf_path)
 
@@ -129,7 +129,7 @@ def crop_table_images(pdf_path: str, regions: List[Dict[str, Any]], dpi: int = 1
         # Apply padding (wider R to prevent Unit cutoff)
         rect = fitz.Rect(max(0, l-15), max(0, y0-10),
                          min(page.rect.width, r+15), min(ph, y1+10))
-        pix  = page.get_pixmap(clip=rect, dpi=dpi)
+        pix  = page.get_pixmap(clip=rect, dpi=300)
         img  = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
 
         region["pil_image"]   = img
@@ -361,7 +361,9 @@ def clean_text(text: str) -> str:
 
 
 def normalize_symbol(symbol: str) -> str:
-    return symbol.replace(" ", "") if symbol and symbol != "-" else "-"
+    if not symbol or symbol == "-": return "-"
+    s = symbol.strip().replace(" ", "").replace("Cdsc", "C").replace("IDdsc", "ID")
+    return s
 
 
 def extract_unit(condition: str, current_unit: str) -> Tuple[str, str]:
@@ -510,8 +512,12 @@ def create_chunks(
                 f"Typ: {typ_val}",
                 f"Max: {max_val}",
             ])
-        if unit != "-":
-            chunk_lines.append(f"Unit: {unit}")
+        if unit == "-" and single_val != "-" and any(u in single_val for u in ("pF","V","A","W")):
+            # Extract unit from Value if the Unit column was missed
+            match = re.search(r'([A-Za-zΩµ°]+)$', single_val)
+            if match:
+                unit = match.group(1)
+                single_val = single_val[:match.start()].strip()
             
         row_txt = "\n".join(ln for ln in chunk_lines if ln)
 
@@ -605,21 +611,34 @@ def _pdfplumber_fallback(pdf_path, region, part_number, table_number) -> List[Ch
                     unit = row[-1]
                     condition, unit = extract_unit(condition, unit)
                     active_vals = [v for v in row[3:-1] if v != "-"]
-                    min_val, typ_val, max_val = "-", "-", "-"
-                    if len(active_vals) >= 3:
+                    min_val, typ_val, max_val, single_val = "-", "-", "-", "-"
+                    
+                    # Logic: if only one value column or header mapping suggests 'Value'
+                    if len(row) == 5: # Param, Symbol, Cond, Value, Unit
+                        single_val = row[3]
+                    elif len(active_vals) >= 3:
                         min_val, typ_val, max_val = active_vals[0], active_vals[1], active_vals[2]
                     elif len(active_vals) == 2:
                         typ_val, max_val = active_vals[0], active_vals[1]
                     elif len(active_vals) == 1:
                         typ_val = active_vals[0]
-                    row_txt = "\n".join(ln for ln in [
+
+                    chunk_lines = [
                         f"Section: {current_section}",
                         f"Parameter: {param}",
                         f"Symbol: {symbol}" if symbol != "-" else "",
                         f"Condition: {condition}" if condition != "-" else "",
-                        f"Min: {min_val}", f"Typ: {typ_val}", f"Max: {max_val}",
-                        f"Unit: {unit}" if unit != "-" else "",
-                    ] if ln)
+                    ]
+                    if single_val != "-":
+                        chunk_lines.append(f"Value: {single_val}")
+                    else:
+                        chunk_lines.extend([
+                            f"Min: {min_val}", f"Typ: {typ_val}", f"Max: {max_val}"
+                        ])
+                    if unit != "-":
+                        chunk_lines.append(f"Unit: {unit}")
+                    
+                    row_txt = "\n".join(ln for ln in chunk_lines if ln)
                     all_chunks.append(Chunk(
                         text=row_txt,
                         chunk_type="parameter_row",
