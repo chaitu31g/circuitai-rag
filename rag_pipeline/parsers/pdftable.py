@@ -12,9 +12,8 @@ class PdfTable:
             with pdfplumber.open(pdf_path) as pdf:
                 for i, page in enumerate(pdf.pages):
                     page_num = i + 1
-                    # Custom settings handle borderless columns and solid row lines efficiently
-                    t_settings = {"vertical_strategy": "text", "horizontal_strategy": "lines"}
-                    page_tables = page.find_tables(table_settings=t_settings)
+                    # Default settings use explicit lines and cell intersection, preventing text shredding
+                    page_tables = page.find_tables()
                     
                     for pt in page_tables:
                         try:

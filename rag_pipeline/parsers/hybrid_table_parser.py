@@ -161,6 +161,7 @@ def extract_tables_hybrid(
     
     # Track the sequential rank of Docling tables per page
     page_rank_counter = {}
+    processed_pdf_tables = set()
 
     for i, tbl in enumerate(tables):
         prov = (tbl.get("prov") or [{}])[0]
@@ -190,6 +191,9 @@ def extract_tables_hybrid(
             
         # Step 3: Match Docling table with PdfTable using page sequentially
         matched_pt = match_docling_table_with_pdftable(tbl, pdf_tables, docling_page_rank)
+        
+        if matched_pt:
+            processed_pdf_tables.add(id(matched_pt))
         
         if not matched_pt:
             logger.warning(f"No PdfTable matched Docling table {i} on page {page}. Falling back to standard Docling format.")
@@ -326,5 +330,117 @@ def extract_tables_hybrid(
                     "parameter": param_val
                 }
             ))
+
+    # --- PROCESS UNMATCHED PDFTABLES (Fragmentation Safeguard) ---
+    # Docling often merges tables, leaving subsequent PdfPlumber fragments orphaned.
+    for pt in pdf_tables:
+        if id(pt) in processed_pdf_tables:
+            continue
+            
+        try:
+            data = pt["data"]
+            if not data or len(data) < 2:
+                continue
+                
+            headers = [str(c).replace('\n', ' ').strip() if c is not None else "" for c in data[0]]
+            clean_rows = []
+            for row in data[1:]:
+                expanded = unmerge_multiline_row(row)
+                clean_rows.extend(expanded)
+                
+            if not clean_rows:
+                continue
+                
+            from rag_pipeline.utils.parameter_extractor import _scrub_and_ffill
+            rows_to_process = _scrub_and_ffill(clean_rows, headers)
+            
+            # Use basic metadata for orphaned tables
+            best_sec = "electrical_characteristics"
+            table_title = ""
+            current_section = best_sec.replace('_', ' ').title()
+            last_condition = "-"
+            
+            # Simple heuristic: inherit section from latest Docling text on that page above bbox
+            page_texts = [
+                t for t in texts 
+                if (t.get("prov") or [{}])[0].get("page_no") == pt["page"]
+            ]
+            pt_top = pt.get("bbox", [0, 0, 0, 0])[1]
+            valid_texts = []
+            for t in page_texts:
+                t_bbox = (t.get("prov") or [{}])[0].get("bbox", [0, 0, 0, 0])
+                if t_bbox[3] < pt_top:  # text is above table
+                    valid_texts.append(t)
+            
+            # Check backwards for the nearest section header
+            for t in reversed(valid_texts):
+                d = _detect_section(t.get("text", ""))
+                if d and d not in _SKIP_TYPES:
+                    best_sec = d
+                    current_section = best_sec.replace('_', ' ').title()
+                    break
+
+            for row_idx, r in enumerate(rows_to_process):
+                row = [str(x).strip() if x is not None and str(x).strip() != "" else "-" for x in r]
+                if not row or all(x == "-" for x in row):
+                    continue
+                if is_section_header_row(row):
+                    current_section = row[0]
+                    last_condition = "-"
+                    continue
+                if len(row) < 4:
+                    continue
+                    
+                param_val = row[0] if row[0] != "-" else "Unknown"
+                symbol_val = normalize_symbol(row[1])
+                
+                condition = row[2]
+                if condition == "-":
+                    condition = last_condition
+                else:
+                    condition = clean_condition(condition)
+                    last_condition = condition
+                    
+                unit_val = row[-1]
+                condition, unit_val = extract_unit(condition, unit_val)
+                
+                val_columns = row[3:-1]
+                active_vals = [v for v in val_columns if v != "-"]
+                
+                min_val, typ_val, max_val = "-", "-", "-"
+                if len(active_vals) >= 3:
+                    min_val, typ_val, max_val = active_vals[0], active_vals[1], active_vals[2]
+                elif len(active_vals) == 2:
+                    typ_val, max_val = active_vals[0], active_vals[1]
+                elif len(active_vals) == 1:
+                    typ_val = active_vals[0]
+                    
+                chunk_lines = [
+                    f"Section: {current_section}",
+                    f"Parameter: {param_val}",
+                    f"Symbol: {symbol_val}" if symbol_val != "-" else "",
+                    f"Condition: {condition}" if condition != "-" else "",
+                    f"Min: {min_val}",
+                    f"Typ: {typ_val}",
+                    f"Max: {max_val}",
+                    f"Unit: {unit_val}" if unit_val != "-" else ""
+                ]
+                row_txt = "\n".join(ln for ln in chunk_lines if ln)
+                
+                all_chunks.append(Chunk(
+                    text=row_txt,
+                    chunk_type="parameter_row",
+                    metadata={
+                        "type": "table_row",
+                        "chunk_type": "parameter_row", 
+                        "part_number": part_number,
+                        "section": best_sec,
+                        "page": pt["page"],
+                        "parameter": param_val
+                    }
+                ))
+        except Exception as e:
+            logger.warning(f"Failed to process orphaned PdfTable: {e}")
+            continue
 
     return all_chunks
