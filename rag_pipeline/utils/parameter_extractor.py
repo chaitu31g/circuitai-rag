@@ -63,8 +63,14 @@ def _scrub_and_ffill(rows: list[list[str]], headers: list[str] = None) -> list[l
     df = pd.DataFrame(rows)
     n_cols = df.shape[1]
 
+    if n_cols == 0:
+        return rows
+
     # Columns to forward-fill: first two (param, symbol) + last (unit)
-    fill_cols = [0, 1, n_cols - 1]
+    fill_cols = []
+    if n_cols > 0: fill_cols.append(0)
+    if n_cols > 1: fill_cols.append(1)
+    if n_cols > 0: fill_cols.append(n_cols - 1)
 
     # Also forward-fill the 'Conditions' column so sub-rows inherit test parameters
     if headers:
@@ -98,12 +104,10 @@ def _scrub_and_ffill(rows: list[list[str]], headers: list[str] = None) -> list[l
             if "condition" in h_str or "test" in h_str:
                 is_condition_col = True
                 
-        if is_condition_col:
+        if is_condition_col and 0 in df.columns:
             # Prevent condition bleeding: only ffill within the same Parameter Name
-            # We assign via df.index to perfectly align the result regardless of pandas version multi-indexing
             filled = df.groupby(0)[col].ffill()
             if isinstance(filled.index, pd.MultiIndex):
-                # Older pandas returns MultiIndex (group, original_index)
                 filled = filled.reset_index(level=0, drop=True)
             df.iloc[:, col] = filled
         else:
