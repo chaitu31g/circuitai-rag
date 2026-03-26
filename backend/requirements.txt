@@ -9,7 +9,7 @@ python-dotenv
 PyYAML==6.0.2                 # Fixed to satisfy paddlex/docling compatibility
 
 # ── Vector database ───────────────────────────────────────────────────────────
-chromadb==0.5.21
+chromadb>=0.6.3               # Upgraded to 0.6.3 for newer tokenizers compatibility
 
 # ── Embedding & Reranking models ──────────────────────────────────────────────
 sentence-transformers>=2.7.0
@@ -23,13 +23,9 @@ pdfplumber                    # Hybrid Table Parser fallback
 PyMuPDF==1.25.1               # Table region cropping (hybrid_table_parser_v3)
 
 # ── HuggingFace / Transformers stack ─────────────────────────────────────────
-# Key constraint matrix:
-#   chromadb 0.5.21   → tokenizers <=0.20.3
-#   docling 2.82      → huggingface-hub <1.0, typer <0.22
-#   docling-ibm-models → transformers <5.0
-#   Table Transformer  → transformers >=4.42 (already satisfied)
-transformers>=4.42.0,<5.0.0
-tokenizers>=0.13.2,<=0.20.3
+# Versions pinned to satisfy RT-DETR-v2 (transformers >= 4.48) and Chromadb
+transformers>=4.48.2
+tokenizers>=0.21.0
 huggingface-hub>=0.23,<1.0.0
 accelerate>=0.29.0
 bitsandbytes>=0.43.0

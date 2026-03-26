@@ -22,8 +22,8 @@ pip uninstall -y paddleocr paddlex easyocr || true
 echo ""
 echo "━━━ Step 1: Pin conflict-sensitive packages ━━━"
 pip install -q \
-    "transformers>=4.42.0,<5.0.0" \
-    "tokenizers>=0.13.2,<=0.20.3" \
+    "transformers>=4.48.2" \
+    "tokenizers>=0.21.0" \
     "huggingface-hub>=0.23,<1.0.0" \
     "typer>=0.12.5,<0.22.0" \
     "numpy>=1.26.0,<2.1.0" \
@@ -53,7 +53,7 @@ pip install -q \
     pdfplumber \
     easyocr \
     onnxruntime \
-    chromadb==0.5.21 --no-deps
+    "chromadb>=0.6.3" --no-deps
 
 echo ""
 echo "━━━ Step 5: Verify no regressions ━━━"
@@ -61,8 +61,8 @@ python - <<'EOF'
 import importlib, sys
 
 checks = {
-    "transformers":     ("4.42", "5.0"),
-    "tokenizers":       ("0.13", "0.21"),
+    "transformers":     ("4.48", "5.0"),
+    "tokenizers":       ("0.21", "0.23"),
     "huggingface_hub":  ("0.23", "1.0"),
     "numpy":            ("1.26", "2.1"),
     "fitz":             None,      # PyMuPDF
