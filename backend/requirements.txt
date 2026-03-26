@@ -10,36 +10,35 @@ python-dotenv
 # ── Vector database ───────────────────────────────────────────────────────────
 chromadb==0.5.21
 
-# ── Embedding & Reranking models (bge-m3 / bge-reranker-large) ───────────────
+# ── Embedding & Reranking models ──────────────────────────────────────────────
 sentence-transformers>=2.7.0
 
-# ── PDF parsing (Docling) ─────────────────────────────────────────────────────
-docling>=2.81.0               # 2.81+ uses docling-parse 5.x (has DecodePageConfig)
+# ── PDF parsing ───────────────────────────────────────────────────────────────
+docling>=2.81.0
 docling-core
-docling-parse>=5.0.0          # 5.x required by docling 2.81+
-docling-ibm-models>=3.12.0,<4.0.0  # layout/table models for docling 2.81
-
-# ── Hybrid Structure Parsing (PaddleOCR) ──────────────────────────────────────
-paddlepaddle                  # CPU compute framework
-paddleocr>=2.7.0              # PPStructure for complex HTML table recreation
-beautifulsoup4                # Parsing OCR HTML structure
-opencv-python                 # Native CV2 image loader for PPStructure
-PyMuPDF==1.25.1
+docling-parse>=5.0.0
+docling-ibm-models>=3.12.0,<4.0.0
+pdfplumber                    # Hybrid Table Parser fallback
+PyMuPDF==1.25.1               # Table region cropping (hybrid_table_parser_v3)
 
 # ── HuggingFace / Transformers stack ─────────────────────────────────────────
-# Versions pinned to satisfy: docling-ibm-models<5.0, chromadb tokenizers<=0.20.3
-transformers>=4.42.0,<5.0.0    # docling-ibm-models requires <5.0
-tokenizers>=0.13.2,<=0.20.3    # chromadb 0.5.21 requires <=0.20.3
-huggingface-hub>=0.23,<1.0.0   # docling 2.82 requires <1
+# Key constraint matrix:
+#   chromadb 0.5.21   → tokenizers <=0.20.3
+#   docling 2.82      → huggingface-hub <1.0, typer <0.22
+#   docling-ibm-models → transformers <5.0
+#   Table Transformer  → transformers >=4.42 (already satisfied)
+transformers>=4.42.0,<5.0.0
+tokenizers>=0.13.2,<=0.20.3
+huggingface-hub>=0.23,<1.0.0
 accelerate>=0.29.0
 bitsandbytes>=0.43.0
 safetensors>=0.4.0
 sentencepiece>=0.1.99
 
-# ── Vision / DePlot / graph extraction ────────────────────────────────────────
-Pillow>=10.4.0               # No upper cap - let Colab use its pre-installed version
-numpy>=1.24.0
-timm>=0.9.0               
+# ── Vision / DePlot / Table Transformer ───────────────────────────────────────
+Pillow>=10.4.0
+numpy>=1.24.0,<2.0.0          # stable across tensorflow, numba, docling
+timm>=0.9.0                   # Table Transformer backbone
 
 # ── LlamaIndex integrations ───────────────────────────────────────────────────
 llama-index-core
@@ -47,7 +46,7 @@ llama-index-readers-docling
 llama-index-vector-stores-chroma
 llama-index-workflows
 
-# ── Sub-dependencies (Force-installed to ensure runtime) ─────────────────────
+# ── Sub-dependencies ──────────────────────────────────────────────────────────
 bcrypt
 build
 chroma-hnswlib
@@ -71,8 +70,9 @@ python-pptx
 jsonlines
 banks
 lxml
-typer>=0.12.5,<0.22.0          # docling 2.82 requires <0.22
-pylatexenc                    # required by docling latex backend
-polyfactory>=2.22.2           # required by docling 2.81+
-rapidocr>=3.3,<4.0.0          # required by docling 2.81+
-colorlog                      # required by rapidocr
+typer>=0.12.5,<0.22.0         # docling 2.82 requires <0.22
+pylatexenc
+polyfactory>=2.22.2
+rapidocr>=3.3,<4.0.0
+colorlog
+onnxruntime

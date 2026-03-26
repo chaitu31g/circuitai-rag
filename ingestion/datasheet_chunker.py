@@ -592,9 +592,9 @@ def chunk_document(
     has_valid_pdf = pdf_path and Path(pdf_path).exists()
     
     if has_valid_pdf:
-        from rag_pipeline.parsers.hybrid_table_parser import extract_tables_hybrid
+        from rag_pipeline.parsers.hybrid_table_parser_v3 import extract_tables_hybrid_v3
         try:
-            table_chunks = extract_tables_hybrid(str(pdf_path), docling_data, part_number)
+            table_chunks = extract_tables_hybrid_v3(str(pdf_path), docling_data, part_number)
             for tc in table_chunks:
                 _add(tc)
         except Exception as e:
