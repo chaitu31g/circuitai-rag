@@ -75,3 +75,7 @@ polyfactory>=2.22.2
 rapidocr>=3.3,<4.0.0
 colorlog
 onnxruntime
+pybase64                      # Required by chromadb 0.6+
+overrides                     # Required by chromadb 0.6+
+httpx                         # Required by chromadb 0.6+
+packaging                     # Used for version verification

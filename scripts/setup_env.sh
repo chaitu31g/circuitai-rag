@@ -2,7 +2,7 @@
 # setup_env.sh – CircuitAI Colab Installation Script
 # =====================================================
 # Designed to resolve all known dependency conflicts between:
-#   - chromadb 0.5.21 (needs tokenizers <=0.20.3)
+#   - chromadb 0.6.3 (needs tokenizers >=0.21.0)
 #   - docling 2.82 (needs huggingface-hub <1.0, typer <0.22)
 #   - docling-ibm-models (needs transformers <5.0)
 #   - Microsoft Table Transformer (needs transformers >=4.42)
@@ -53,6 +53,7 @@ pip install -q \
     pdfplumber \
     easyocr \
     onnxruntime \
+    pybase64 overrides httpx \
     "chromadb>=0.6.3" --no-deps
 
 echo ""
