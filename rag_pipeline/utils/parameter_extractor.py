@@ -81,8 +81,33 @@ def _scrub_and_ffill(rows: list[list[str]], headers: list[str] = None) -> list[l
         df.iloc[:, col] = df.iloc[:, col].replace([None, ""], pd.NA)
 
     # ── Step 2: Forward-fill blanks downward ──────────────────────────────────
+    # First, always ffill the Parameter Name (col 0) and Symbol (col 1) so groups are correct
+    if 0 in fill_cols:
+        df.iloc[:, 0] = df.iloc[:, 0].ffill()
+    if 1 in fill_cols:
+        df.iloc[:, 1] = df.iloc[:, 1].ffill()
+
+    # Now ffill the rest
     for col in fill_cols:
-        df.iloc[:, col] = df.iloc[:, col].ffill()
+        if col in (0, 1):
+            continue
+            
+        is_condition_col = False
+        if headers and col < len(headers):
+            h_str = str(headers[col]).lower()
+            if "condition" in h_str or "test" in h_str:
+                is_condition_col = True
+                
+        if is_condition_col:
+            # Prevent condition bleeding: only ffill within the same Parameter Name
+            # We assign via df.index to perfectly align the result regardless of pandas version multi-indexing
+            filled = df.groupby(0)[col].ffill()
+            if isinstance(filled.index, pd.MultiIndex):
+                # Older pandas returns MultiIndex (group, original_index)
+                filled = filled.reset_index(level=0, drop=True)
+            df.iloc[:, col] = filled
+        else:
+            df.iloc[:, col] = df.iloc[:, col].ffill()
 
     # ── Step 3: Convert any remaining NA back to "" for downstream safety ─────
     df = df.fillna("")
