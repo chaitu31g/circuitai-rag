@@ -39,6 +39,7 @@ MIN_FIGURE_TEXT    = 20      # characters; below this a figure chunk is discarde
 MAX_PROSE_CHARS    = 900     # semantic-pass: max chars per structured chunk
 WINDOW_CHARS       = 700     # coverage-pass: characters per sliding window
 WINDOW_STEP_CHARS  = 500     # coverage-pass: step size (200 char overlap)
+PROCESS_FIGURES    = False   # Pipeline optimization: skip expensive figure OCR/vision
 
 # Patterns that indicate garbage OCR / DePlot output
 _FIGURE_GARBAGE_PATTERNS = [
@@ -105,6 +106,13 @@ def _extract_part_number(texts: list[dict]) -> Optional[str]:
         if 3 < len(txt) < 40 and re.search(r"[A-Z]{2,}[\d]{2,}", txt):
             return txt
     return None
+
+
+def should_skip_element(element_type: str) -> bool:
+    """Helper for early pipeline filtering of computationally expensive elements."""
+    if PROCESS_FIGURES:
+        return False
+    return element_type in ["figure", "image", "graph", "picture"]
 
 
 def _split_prose(text: str, max_len: int = MAX_PROSE_CHARS) -> list[str]:
@@ -627,42 +635,46 @@ def chunk_document(
             for rc in row_chunks:
                 _add(rc)
 
-    # Figures
-    for fig in pictures:
-        if not fig.get("captions"):
-            f_prov = (fig.get("prov") or [{}])[0]
-            f_page = f_prov.get("page_no")
-            f_bbox = f_prov.get("bbox")
-            
-            if f_page and f_bbox:
-                best_cap = None
-                min_dist = float('inf')
-                f_y = f_bbox.get("t", 0)
+    if not should_skip_element("figure"):
+        # Figures - Spatial caption enrichment
+        for fig in pictures:
+            if not fig.get("captions"):
+                f_prov = (fig.get("prov") or [{}])[0]
+                f_page = f_prov.get("page_no")
+                f_bbox = f_prov.get("bbox")
                 
-                for t in texts:
-                    t_text = t.get("text", "").strip()
-                    if not t_text or t_text in seen_raws:
-                        continue
-                    t_prov = (t.get("prov") or [{}])[0]
-                    if t_prov.get("page_no") != f_page:
-                        continue
-                    is_potential_cap = (
-                        re.match(r"^(Figure|Fig|Chart|Graph|Scheme|Diagram|Table)\.?\s*(\d+|[A-Z])", t_text, re.I) or
-                        any(kw in t_text for kw in ["Curve", "Characteristic", "Plot", "Waveform", "Diagram", "Circuit"])
-                    ) and len(t_text) < 150
-                    if is_potential_cap:
-                        t_bbox = t_prov.get("bbox")
-                        if t_bbox:
-                            dist = abs(t_bbox.get("t", 0) - f_y)
-                            if dist < min_dist:
-                                min_dist = dist
-                                best_cap = t_text
-                if best_cap and min_dist < 200:
-                    fig["captions"] = [{"text": best_cap}]
-                    seen_raws.add(best_cap)
+                if f_page and f_bbox:
+                    best_cap = None
+                    min_dist = float('inf')
+                    f_y = f_bbox.get("t", 0)
+                    
+                    for t in texts:
+                        t_text = t.get("text", "").strip()
+                        if not t_text or t_text in seen_raws:
+                            continue
+                        t_prov = (t.get("prov") or [{}])[0]
+                        if t_prov.get("page_no") != f_page:
+                            continue
+                        is_potential_cap = (
+                            re.match(r"^(Figure|Fig|Chart|Graph|Scheme|Diagram|Table)\.?\s*(\d+|[A-Z])", t_text, re.I) or
+                            any(kw in t_text for kw in ["Curve", "Characteristic", "Plot", "Waveform", "Diagram", "Circuit"])
+                        ) and len(t_text) < 150
+                        if is_potential_cap:
+                            t_bbox = t_prov.get("bbox")
+                            if t_bbox:
+                                dist = abs(t_bbox.get("t", 0) - f_y)
+                                if dist < min_dist:
+                                    min_dist = dist
+                                    best_cap = t_text
+                    if best_cap and min_dist < 200:
+                        fig["captions"] = [{"text": best_cap}]
+                        seen_raws.add(best_cap)
 
-    for fig_idx, fig in enumerate(pictures):
-        _add_figure(chunk_figure(fig, part_number, pdf_path=pdf_path, figure_index=fig_idx))
+        for fig_idx, fig in enumerate(pictures):
+            _add_figure(chunk_figure(fig, part_number, pdf_path=pdf_path, figure_index=fig_idx))
+    else:
+        if pictures:
+            logger.info("Skipping figure processing early (all pages) to optimize ingestion.")
 
     # ═══════════════════════════════════════════════════════════════════════
     # PASS 2 — Sliding-window coverage guarantee
