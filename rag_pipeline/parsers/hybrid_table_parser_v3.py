@@ -247,22 +247,29 @@ def assign_words_to_cells(
     # Within each cell, sort words spatially (reading order) and join intelligently
     def _join_cell_words(word_list: List[Dict]) -> str:
         if not word_list: return "-"
-        # Sort primarily by Y (line by line) then X
-        word_list = sorted(word_list, key=lambda w: (round(w["top"],0), w["x0"]))
+        # Use finer-grained Y sorting
+        word_list = sorted(word_list, key=lambda w: (w["top"], w["x0"]))
         
         text_out = ""
         for i, w in enumerate(word_list):
-            curr_text = w["text"]
+            curr_text = w["text"].strip()
+            if not curr_text: continue
             if i > 0:
                 prev = word_list[i-1]
-                # If this word is significantly higher than previous but overlapping in X, it's an exponent
-                if (prev["top"] - w["top"]) > 2 and _overlap_1d(prev["x0"], prev["x1"], w["x0"], w["x1"]) > 0:
+                # If this word is OFFSET ABOVE the previous but overlaps in X, it's an exponent
+                # (prev["top"] - w["top"]) > 1.5 indicates a superscript position
+                dx = _overlap_1d(prev["x0"], prev["x1"], w["x0"], w["x1"])
+                if (prev["top"] - w["top"]) > 1.2 and dx > 0:
                     text_out += "^" + curr_text
                 else:
                     text_out += " " + curr_text
             else:
                 text_out = curr_text
-        return text_out
+        
+        # Clean double spaces and common merge artifacts
+        text_out = re.sub(r'\s+', ' ', text_out).strip()
+        text_out = text_out.replace("10 ^", "10^") # join exponent separator if any
+        return text_out or "-"
 
     return [[_join_cell_words(cell) for cell in row] for row in grid]
 
@@ -322,15 +329,23 @@ def clean_text(text: str) -> str:
     text = text.strip()
 
     # Known OCR subscript re-attachments
-    text = re.sub(r'\bC\s+oss\b',    'Coss',    text)
-    text = re.sub(r'\bC\s+iss\b',    'Ciss',    text)
-    text = re.sub(r'\bC\s+rss\b',    'Crss',    text)
-    text = re.sub(r'\bt\s+d\(',      'td(',     text)
-    text = re.sub(r'\bt\s+r\b',      'tr',      text)
-    text = re.sub(r'\bt\s+f\b',      'tf',      text)
-    text = re.sub(r'\bR\s+DS',       'RDS',     text)
-    text = re.sub(r'\bV\s+GS',       'VGS',     text)
-    text = re.sub(r'\bV\s+DS',       'VDS',     text)
+    text = re.sub(r'\bC\s*([iors])ss\b', r'C\1ss', text) # C iss -> Ciss
+    text = re.sub(r'\bt\s*d\s*\(',      'td(',     text) # t d ( -> td(
+    text = re.sub(r'\bR\s*DS\(on\)',     'Rds(on)', text, flags=re.I)
+    text = re.sub(r'\bV\s*GS\(th\)',     'Vgs(th)', text, flags=re.I)
+    text = re.sub(r'\bV\s*(GS|DS)\b',   r'V\1',    text, flags=re.I)
+    text = re.sub(r'\bI\s*D\b',         'ID',      text, flags=re.I)
+    text = re.sub(r'(\d+)\s+([A-Za-zΩµ°%]+)\b', r'\1\2', text) # 10 V -> 10V
+    
+    # Scientific notation 10 0 -> 10^0
+    text = re.sub(r'\b10\s+(\d)\b', r'10^\1', text)
+    
+    # Merged symbols
+    text = text.replace("CpF", "pF").replace("V_DSV", "Vds").replace("VDSV", "Vds")
+    
+    # Remove internal double spaces
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text or "-"
     text = re.sub(r'\bI\s+D\b',      'ID',      text)
 
     # Scientific notation 10 0 -> 10^0
@@ -362,12 +377,17 @@ def extract_unit(condition: str, current_unit: str) -> Tuple[str, str]:
 def is_section_header_row(row: List[str]) -> bool:
     if not row:
         return False
-    cells = [c.strip() for c in row]
-    return (
-        len(cells[0]) > 0
-        and all(not c or c == "-" for c in cells[1:])
-        and not any(any(ch.isdigit() for ch in c) for c in cells)
-    )
+    cells = [c.strip() for c in row if c]
+    if not cells: return False
+    
+    # Check for "Figure X", "Table X", "Typ. X"
+    first = cells[0].lower()
+    if re.search(r'\b(figure|fig\.|typ\.|diagram|characteristic)\b', first):
+        return True
+    
+    # Generic section header: a single occupied cell
+    non_empty = [c for c in row if c and c != "-"]
+    return len(non_empty) == 1 and len(cells) > 3
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -436,6 +456,12 @@ def create_chunks(
         cells = [c.strip() or "-" for c in row]
         if not cells or all(c == "-" for c in cells):
             continue
+            
+        # Ignore axis-heavy graph data (too many numbers)
+        num_cells = sum(1 for c in cells if any(ch.isdigit() for ch in c))
+        if len(cells) > 10 and num_cells > 8:
+            continue
+            
         if is_section_header_row(cells):
             current_section = cells[0]
             last_condition = "-"
