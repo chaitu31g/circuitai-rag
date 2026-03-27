@@ -1,6 +1,9 @@
-# ── AI Engine & Transformers (Strict Pins) ──────────────────────────────────
+# ── AI Engine & serving (Quantization Tier) ──────────────────────────────────
+# Essential for Qwen/Llama instructed models
 transformers==4.48.2
 tokenizers==0.21.0
+bitsandbytes>=0.43.0
+accelerate>=0.29.0
 huggingface-hub>=0.23.0
 torch>=2.2.0
 
@@ -26,15 +29,14 @@ python-dotenv
 python-multipart==0.0.19
 requests==2.32.4
 
-# ── OPENTELEMETRY CORE STABILITY (Docling < 1.39.0) ──────────────────────────
-# These pins remain essential to bridge the two major AI libraries.
+# ── OPENTELEMETRY CORE STABILITY ───────────────────────────────────────────
 opentelemetry-api==1.38.0
 opentelemetry-sdk==1.38.0
 
-# DO NOT pin Typer directly. 
-# Let the resolver align typer and typer-slim automatically.
+# ── Typer Stability ──
+typer==0.12.5
 
-# ── Core Utils & Runtime ──
+# ── Support Utils & Runtime ──
 jedi>=0.19.0
 numpy>=1.26.0,<2.1.0
 Pillow>=10.4.0
