@@ -283,6 +283,9 @@ def create_chunks(
     # (col_map already built from detect_header_row)
 
     last_condition = "-"
+    last_parameter = "Unknown"
+    last_symbol    = "-"
+    last_unit      = "-"
     current_section = section.replace("_", " ").title()
 
     for row in grid[1:]:          # skip header row
@@ -298,14 +301,23 @@ def create_chunks(
         if is_section_header_row(cells):
             current_section = cells[0]
             last_condition = "-"
+            last_parameter = "Unknown"
+            last_symbol = "-"
+            last_unit = "-"
             continue
         if len(cells) < 3:
             continue
 
-        param  = _get_cell(cells, col_map, "parameter")
-        if param == "-":
-            param = "Unknown"
-        symbol = normalize_symbol(_get_cell(cells, col_map, "symbol"))
+        # --- Semantic Forward Fill Logic ---
+        raw_param = _get_cell(cells, col_map, "parameter")
+        if raw_param != "-":
+            last_parameter = raw_param
+        param = last_parameter
+
+        raw_symbol = normalize_symbol(_get_cell(cells, col_map, "symbol"))
+        if raw_symbol != "-":
+            last_symbol = raw_symbol
+        symbol = last_symbol
         
         # Correction for parameter name drift
         if symbol in ("Ciss", "Coss", "Crss", "C") and "current" in param.lower():
@@ -314,13 +326,17 @@ def create_chunks(
             param = "Continuous drain current"
 
         cond_raw = _get_cell(cells, col_map, "condition")
-        if cond_raw == "-":
-            condition = last_condition
-        else:
+        if cond_raw != "-":
             condition = clean_text(cond_raw)
             last_condition = condition
+        else:
+            condition = last_condition
 
-        unit = _get_cell(cells, col_map, "unit")
+        raw_unit = _get_cell(cells, col_map, "unit")
+        if raw_unit != "-":
+            last_unit = raw_unit
+        unit = last_unit
+        
         condition, unit = extract_unit(condition, unit)
 
         min_val, typ_val, max_val, single_val = _resolve_values(cells, col_map)
