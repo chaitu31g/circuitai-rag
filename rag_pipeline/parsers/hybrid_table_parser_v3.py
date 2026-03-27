@@ -317,9 +317,19 @@ def create_chunks(
         if not cells or all(c == "-" for c in cells):
             continue
             
-        # Ignore axis-heavy graph data (too many numbers)
-        num_cells = sum(1 for c in cells if any(ch.isdigit() for ch in c))
-        if len(cells) > 10 and num_cells > 8:
+        # --- Graph Suppression Logic (Anti-Hallucination) ---
+        # Graphs often produce rows like ['1E-03', '10ms', '1E-02']. We must reject these.
+        num_exponential = sum(1 for c in cells if re.search(r'E[+-]?\d{2}', c))
+        num_numeric     = sum(1 for c in cells if any(ch.isdigit() for ch in c))
+        num_text_heavy  = sum(1 for c in cells if len([ch for ch in c if ch.isalpha()]) > 3)
+
+        # If more than 2 cells have scientific notation or the row is 80% numeric with NO text
+        if num_exponential >= 2 or (num_numeric > 0 and num_text_heavy == 0):
+             # This is clearly a graph axis or coordinate grid, not a data row
+             continue
+
+        # Ignore axis-heavy graph data (too many numbers/too wide)
+        if len(cells) > 10 and num_numeric > 8:
             continue
             
         if is_section_header_row(cells):
