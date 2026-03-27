@@ -1,59 +1,23 @@
 """
-hybrid_table_parser_v3.py – Docling + Table Transformer + pdfplumber Pipeline
-==============================================================================
+hybrid_table_parser_v3.py – Docling + Camelot Hybrid Pipeline
+============================================================
 Architecture:
   PDF → Docling (section/bbox detection)
-      → PyMuPDF (crop table images)
-      → Microsoft Table Transformer (row/col structure)
-      → pdfplumber (word coordinates)
-      → Cell assignment (overlap matching)
+      → Camelot-py (precise lattice/stream extraction)
       → Column mapping + cleaning
       → Chunk generation
-      → Fallback: pdfplumber-only if Table Transformer fails
+      → Fallback: pdfplumber-only 
 """
 
 import re
 import logging
+import camelot
 from typing import List, Dict, Any, Optional, Tuple
 from functools import lru_cache
-
-import fitz  # PyMuPDF
-import pdfplumber
-from PIL import Image
-import torch
-from transformers import AutoImageProcessor, TableTransformerForObjectDetection
 
 from ingestion.datasheet_chunker import _get_table_contexts, _detect_section, _SKIP_TYPES, Chunk
 
 logger = logging.getLogger(__name__)
-
-# ─────────────────────────────────────────────────────────────────
-# MODEL LOADING  (lazy singleton – loaded once, shared everywhere)
-# ─────────────────────────────────────────────────────────────────
-_processor: Optional[AutoImageProcessor] = None
-_model: Optional[TableTransformerForObjectDetection] = None
-
-def _get_model() -> Tuple[AutoImageProcessor, TableTransformerForObjectDetection]:
-    global _processor, _model
-    if _model is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        logger.info(f"Loading Microsoft Table Transformer on {device}…")
-        _processor = AutoImageProcessor.from_pretrained(
-            "microsoft/table-transformer-structure-recognition"
-        )
-        _model = TableTransformerForObjectDetection.from_pretrained(
-            "microsoft/table-transformer-structure-recognition"
-        ).to(device)
-        _model.eval()
-        logger.info("Table Transformer loaded ✓")
-    return _processor, _model
-
-# Label indices from Table Transformer's id2label
-_TABLE_LABELS = {
-    "table row": 2,
-    "table column": 3,
-    "table column header": 4,
-}
 
 # ─────────────────────────────────────────────────────────────────
 # 1. TABLE REGION EXTRACTION  (Docling → bbox + section)
@@ -71,15 +35,13 @@ def extract_table_regions(docling_data: dict) -> List[Dict[str, Any]]:
         if not page_no or not bbox:
             continue
 
-        # Normalise bbox → [l, t, r, b]  (handle Docling dict OR list format)
+        # Normalise bbox → [l, t, r, b]
         if isinstance(bbox, dict):
             valid_bbox = [bbox.get("l",0), bbox.get("t",0), bbox.get("r",0), bbox.get("b",0)]
-            bottom_left_origin = True
         else:
             valid_bbox = list(bbox[:4])
-            bottom_left_origin = False
 
-        # Infer section from nearest Docling text block on the same page
+        # Infer section
         best_sec = "electrical_characteristics"
         for t in texts:
             t_page = (t.get("prov") or [{}])[0].get("page_no")
@@ -93,8 +55,6 @@ def extract_table_regions(docling_data: dict) -> List[Dict[str, Any]]:
             "table_index":          i,
             "page_no":              page_no,
             "bbox":                 valid_bbox,
-            "bottom_left_origin":   bottom_left_origin,
-            "docling_tbl":          tbl,
             "section":              best_sec,
         })
 
@@ -102,185 +62,52 @@ def extract_table_regions(docling_data: dict) -> List[Dict[str, Any]]:
 
 
 # ─────────────────────────────────────────────────────────────────
-# 2. IMAGE CROPPING  (PyMuPDF → PIL Image)
+# 2. TABLE STRUCTURE DETECTION  (Camelot-py)
 # ─────────────────────────────────────────────────────────────────
-def crop_table_images(pdf_path: str, regions: List[Dict[str, Any]], dpi: int = 150) -> List[Dict[str, Any]]:
-    """
-    Attach a PIL Image to every region dict.
-    `dpi=300` provides high resolution for thin column lines.
-    """
-    doc = fitz.open(pdf_path)
-
-    for region in regions:
-        page_num = region["page_no"] - 1
-        if page_num < 0 or page_num >= doc.page_count:
-            continue
-
-        page = doc.load_page(page_num)
-        l, t, r, b = region["bbox"]
-
-        # Invert Y if Docling used bottom-left origin
-        ph = page.rect.height
-        if region["bottom_left_origin"] and t > b:
-            y0, y1 = ph - t, ph - b
-        else:
-            y0, y1 = t, b
-
-        # Apply padding (wider R to prevent Unit cutoff)
-        rect = fitz.Rect(max(0, l-15), max(0, y0-10),
-                         min(page.rect.width, r+15), min(ph, y1+10))
-        pix  = page.get_pixmap(clip=rect, dpi=300)
-        img  = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-
-        region["pil_image"]   = img
-        region["page_rect"]   = rect          # fitz.Rect of the crop in PDF coords
-        region["page_height"] = ph
-
-    doc.close()
-    return regions
-
-
-# ─────────────────────────────────────────────────────────────────
-# 3. TABLE STRUCTURE DETECTION  (Table Transformer)
-# ─────────────────────────────────────────────────────────────────
-def detect_table_structure(image: Image.Image, threshold: float = 0.5) -> Dict[str, List]:
-    """
-    Run Table Transformer on a PIL image.
-    Returns {"rows": [...], "columns": [...]} where each entry is a
-    normalised [x0,y0,x1,y1] box in IMAGE pixel space.
-    """
-    processor, model = _get_model()
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    inputs  = processor(images=image, return_tensors="pt")
-    inputs  = {k: v.to(device) for k, v in inputs.items()}
-    W, H    = image.size
-
-    with torch.no_grad():
-        outputs = model(**inputs)
-
-    results = processor.post_process_object_detection(
-        outputs,
-        threshold=threshold,
-        target_sizes=[(H, W)]
-    )[0]
-
-    rows, columns = [], []
-    for score, label, box in zip(results["scores"], results["labels"], results["boxes"]):
-        lbl_name = model.config.id2label[label.item()]
-        box_px   = [round(v, 1) for v in box.tolist()]
-        if "row" in lbl_name:
-            rows.append(box_px)
-        elif "column" in lbl_name:
-            columns.append(box_px)
-
-    # Sort top-to-bottom and left-to-right
-    rows    = sorted(rows,    key=lambda b: b[1])
-    columns = sorted(columns, key=lambda b: b[0])
-    return {"rows": rows, "columns": columns}
-
-
-# ─────────────────────────────────────────────────────────────────
-# 4. TEXT EXTRACTION  (pdfplumber word coordinates)
-# ─────────────────────────────────────────────────────────────────
-def extract_words_pdfplumber(pdf_path: str, page_no: int, crop_rect: fitz.Rect) -> List[Dict]:
-    """
-    Extract word-level bounding boxes from pdfplumber for the table crop region.
-    Coordinates are in PDF-space (same unit as fitz.Rect).
-    """
-    words = []
-    with pdfplumber.open(pdf_path) as pdf:
-        page = pdf.pages[page_no - 1]
-        # Restrict pdfplumber to the crop area
-        cropped = page.within_bbox((
-            crop_rect.x0, crop_rect.y0,
-            crop_rect.x1, crop_rect.y1
-        ))
-        for w in (cropped.extract_words() or []):
-            words.append({
-                "text":   w["text"],
-                "x0":     w["x0"] - crop_rect.x0,   # shift to image-local coords
-                "x1":     w["x1"] - crop_rect.x0,
-                "top":    w["top"] - crop_rect.y0,
-                "bottom": w["bottom"] - crop_rect.y0,
-            })
-    return words
-
-
-# ─────────────────────────────────────────────────────────────────
-# 5. CELL RECONSTRUCTION (overlap matching)
-# ─────────────────────────────────────────────────────────────────
-def _overlap_1d(a0, a1, b0, b1) -> float:
-    return max(0.0, min(a1, b1) - max(a0, b0))
-
-def _overlap_area(word: Dict, row_box, col_box) -> float:
-    ox = _overlap_1d(word["x0"], word["x1"], col_box[0], col_box[2])
-    oy = _overlap_1d(word["top"], word["bottom"], row_box[1], row_box[3])
-    return ox * oy
-
-def assign_words_to_cells(
-    words:   List[Dict],
-    rows:    List[List],
-    columns: List[List],
+def detect_table_structure_camelot(
+    pdf_path: str, 
+    page_no: int, 
+    bbox: List[float]
 ) -> List[List[str]]:
     """
-    Assign each word to the (row, col) cell with maximum overlap area.
-    Returns a 2-D list[row][col] of strings.
+    Run Camelot on the specific table region.
+    `bbox` is [l, t, r, b] in standard PDF coordinates (72 dpi).
     """
-    n_rows = len(rows)
-    n_cols = len(columns)
-    if n_rows == 0 or n_cols == 0:
+    try:
+        # Convert Docling bbox to Camelot string format: "x1,y1,x2,y2"
+        # Camelot expects coordinates in standard 72 dpi PDF space.
+        # Docling uses standard PDF origin (bottom-left) for its bboxes.
+        area = f"{bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]}"
+        
+        # Try Lattice mode first (for tables with lines)
+        tables = camelot.read_pdf(
+            pdf_path,
+            pages=str(page_no),
+            flavor='lattice',
+            table_areas=[area]
+        )
+        
+        # If no tables found with Lattice (lines), try Stream (whitespace)
+        if len(tables) == 0:
+            tables = camelot.read_pdf(
+                pdf_path,
+                pages=str(page_no),
+                flavor='stream',
+                table_areas=[area]
+            )
+            
+        if len(tables) > 0:
+            # We take the first table found in the specified area
+            return tables[0].df.values.tolist()
+            
         return []
-
-    grid: List[List[List[str]]] = [[[] for _ in range(n_cols)] for _ in range(n_rows)]
-
-    for word in words:
-        best_r, best_c, best_area = 0, 0, -0.01
-        for ri, row_box in enumerate(rows):
-            for ci, col_box in enumerate(columns):
-                area = _overlap_area(word, row_box, col_box)
-                if area > best_area:
-                    best_area = area
-                    best_r, best_c = ri, ci
-        if best_area > 0:
-            grid[best_r][best_c].append(word)
-
-    # Within each cell, sort words spatially (reading order) and join intelligently
-    def _join_cell_words(word_list: List[Dict]) -> str:
-        if not word_list: return "-"
-        # Use finer-grained Y sorting
-        word_list = sorted(word_list, key=lambda w: (w["top"], w["x0"]))
-        
-        text_out = ""
-        for i, w in enumerate(word_list):
-            curr_text = w["text"].strip()
-            if not curr_text: continue
-            if i > 0:
-                prev = word_list[i-1]
-                # If this word is OFFSET ABOVE the previous but overlaps in X, it's an exponent
-                # (prev["top"] - w["top"]) > 1.5 indicates a superscript position
-                dx = _overlap_1d(prev["x0"], prev["x1"], w["x0"], w["x1"])
-                if (prev["top"] - w["top"]) > 1.2 and dx > 0:
-                    text_out += "^" + curr_text
-                else:
-                    text_out += " " + curr_text
-            else:
-                text_out = curr_text
-        
-        # Clean double spaces and common merge artifacts
-        text_out = re.sub(r'\s+', ' ', text_out).strip()
-        text_out = text_out.replace("10 ^", "10^") # join exponent separator if any
-        return text_out or "-"
-
-    return [[_join_cell_words(cell) for cell in row] for row in grid]
-
-
-def build_table_grid(words, structure) -> List[List[str]]:
-    """Convenience wrapper → returns grid[row][col]."""
-    return assign_words_to_cells(words, structure["rows"], structure["columns"])
+    except Exception as e:
+        logger.warning(f"Camelot extraction failed for page {page_no}: {e}")
+        return []
 
 
 # ─────────────────────────────────────────────────────────────────
-# 6. HEADER DETECTION
+# 3. HEADER DETECTION
 # ─────────────────────────────────────────────────────────────────
 _HEADER_KEYWORDS = {
     "parameter": "parameter",
@@ -655,63 +482,47 @@ def _pdfplumber_fallback(pdf_path, region, part_number, table_number) -> List[Ch
 
 
 
-# ─────────────────────────────────────────────────────────────────
-# MAIN ENTRYPOINT
-# ─────────────────────────────────────────────────────────────────
 def extract_tables_hybrid_v3(
     pdf_path:     str,
     docling_data: dict,
     part_number:  str,
 ) -> List[Chunk]:
     """
-    Full pipeline: Docling → crop → Table Transformer → pdfplumber words
-                → cell grid → column map → chunks.
-    Falls back to pdfplumber-only on any Table Transformer failure.
+    Full pipeline: Docling (detection) → Camelot (extraction) → Chunks.
+    Falls back to simple pdfplumber if Camelot yields nothing.
     """
     all_chunks: List[Chunk] = []
     regions = extract_table_regions(docling_data)
-    regions = crop_table_images(pdf_path, regions)
 
     for region in regions:
         table_num = region["table_index"] + 1
 
-        if "pil_image" not in region:
-            logger.warning(f"No image for table {table_num}. Skipping.")
-            continue
-
         try:
-            # ── Structure detection ──────────────────────────────────
-            structure = detect_table_structure(region["pil_image"])
-
-            if not structure["rows"] or not structure["columns"]:
-                raise ValueError("No rows or columns detected by Table Transformer.")
-
-            # ── Word extraction (pdfplumber, PDF coords) ─────────────
-            words = extract_words_pdfplumber(
-                pdf_path, region["page_no"], region["page_rect"]
+            # ── Camelot extraction within Docling region ─────────────
+            grid = detect_table_structure_camelot(
+                pdf_path, region["page_no"], region["bbox"]
             )
 
-            # ── Cell assignment ──────────────────────────────────────
-            grid = build_table_grid(words, structure)
-
             if not grid:
-                raise ValueError("Empty grid after cell assignment.")
+                raise ValueError("Camelot returned an empty grid for this region.")
 
             # ── Header → column map ──────────────────────────────────
-            header_row = [clean_text(c) for c in grid[0]]
+            # Clean text in each cell
+            clean_grid = [[clean_text(cell) for cell in row] for row in grid]
+            header_row = clean_grid[0]
             col_map    = map_columns(header_row)
 
             # ── Chunk generation ─────────────────────────────────────
             chunks = create_chunks(
-                grid, col_map,
+                clean_grid, col_map,
                 region["section"], part_number,
                 region["page_no"], table_num
             )
             all_chunks.extend(chunks)
-            logger.info(f"Table {table_num} (page {region['page_no']}): {len(chunks)} chunks via Table Transformer.")
+            logger.info(f"Table {table_num} (page {region['page_no']}): {len(chunks)} chunks via Camelot.")
 
         except Exception as e:
-            logger.warning(f"Table Transformer failed for table {table_num}: {e}. Using pdfplumber fallback.")
+            logger.warning(f"Camelot failed for table {table_num} on page {region['page_no']}: {e}. Falling back to pdfplumber.")
             fb = _pdfplumber_fallback(pdf_path, region, part_number, table_num)
             all_chunks.extend(fb)
 

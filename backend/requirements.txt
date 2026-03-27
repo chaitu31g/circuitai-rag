@@ -1,5 +1,4 @@
 # ── AI Engine & serving (Quantization Tier) ──────────────────────────────────
-# Essential for Qwen/Llama instructed models
 transformers==4.48.2
 tokenizers==0.21.0
 bitsandbytes>=0.43.0
@@ -7,11 +6,14 @@ accelerate>=0.29.0
 huggingface-hub>=0.23.0
 torch>=2.2.0
 
-# ── PDF & Table Parsing (Docling Managed) ────────────────────────────────────
+# ── PDF & Table Parsing (Camelot Tier) ───────────────────────────────────────
+# Replacing Microsoft Table Transformer with Camelot-py
+camelot-py[cv]==0.11.0
+opencv-python-headless
+ghostscript       # Python bridge for Ghostscript
 docling==2.14.0
 pdfplumber==0.11.4
 PyMuPDF==1.25.1
-timm>=0.9.0
 
 # ── Vector DB & RAG (Serving Tier) ────────────────────────────────────────────
 chromadb==0.6.3
@@ -20,7 +22,7 @@ llama-index-core>=0.12.0
 llama-index-readers-docling
 llama-index-vector-stores-chroma
 
-# ── Web Framework & Pydantic ──────────────────────────────────────────────────
+# ── Web Framework & Stability ──────────────────────────────────────────────────
 fastapi>=0.115.0
 uvicorn[standard]>=0.34.0
 pydantic>=2.10.0
@@ -28,12 +30,8 @@ pydantic-settings==2.7.0
 python-dotenv
 python-multipart==0.0.19
 requests==2.32.4
-
-# ── OPENTELEMETRY CORE STABILITY ───────────────────────────────────────────
 opentelemetry-api==1.38.0
 opentelemetry-sdk==1.38.0
-
-# ── Typer Stability ──
 typer==0.12.5
 
 # ── Support Utils & Runtime ──
