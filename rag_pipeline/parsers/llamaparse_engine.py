@@ -1,10 +1,10 @@
 """
-llamaparse_engine.py – Hardened Google Drive Version
-===================================================
-Hardened for Colab/Drive Environments:
-  1. Finds .env in project root by tracing __file__ path.
-  2. Prints DEBUG messages to console to trace search location.
-  3. Fails loudly with a helpful error message if key is missing.
+llamaparse_engine.py – Zero-Fail Colab Edition
+=============================================
+Search Order for API Key:
+  1. Google Colab Secrets (userdata.get)
+  2. Environment Variables (os.getenv)
+  3. Absolute .env path (dotenv)
 """
 
 import os
@@ -16,27 +16,52 @@ from pathlib import Path
 from dotenv import load_dotenv
 from llama_parse import LlamaParse
 
+# Try to import Colab specific userdata
+try:
+    from google.colab import userdata
+    COLAB_AVAILABLE = True
+except ImportError:
+    COLAB_AVAILABLE = False
+
 from ingestion.datasheet_chunker import Chunk
 
 logger = logging.getLogger(__name__)
 
-# --- LOAD DOTENV FROM ABSOLUTE PROJECT ROOT ---
-# This file is in: /content/drive/MyDrive/circuitai-rag/rag_pipeline/parsers/llamaparse_engine.py
-# Root is 2 levels up.
-env_path = Path(__file__).resolve().parents[2] / ".env"
-print(f"🔍 DEBUG: LlamaParse searching for .env at: {env_path}")
+def get_api_key() -> str:
+    """Rigorous 3-tier search for the LLAMA_CLOUD_API_KEY."""
+    key = None
+    
+    # Tier 1: Colab Secrets
+    if COLAB_AVAILABLE:
+        try:
+            key = userdata.get('LLAMA_CLOUD_API_KEY')
+            if key:
+                print("🔑 DEBUG: Found API key in Colab Secrets.")
+                return key
+        except Exception:
+            pass
 
-if env_path.exists():
-    load_dotenv(dotenv_path=env_path)
-    print(f"✅ DEBUG: FOUND .env at {env_path}")
-else:
-    print(f"⚠️ DEBUG: NO .env file found at {env_path} - check your Drive folder!")
+    # Tier 2: Environment Variable
+    key = os.getenv("LLAMA_CLOUD_API_KEY")
+    if key and key != "YOUR_KEY_HERE":
+        print("🔑 DEBUG: Found API key in Environment Variables.")
+        return key
+        
+    # Tier 3: .env file
+    env_path = Path(__file__).resolve().parents[2] / ".env"
+    if env_path.exists():
+        load_dotenv(dotenv_path=env_path)
+        key = os.getenv("LLAMA_CLOUD_API_KEY")
+        if key and key != "llx-4aG7TVeOlsjrXgtf9pFav5hZTNNENyA7MiHzpp136f4gfIQi":
+            print(f"🔑 DEBUG: Found API key in .env at {env_path}")
+            return key
+            
+    return ""
 
-# --- CONFIGURATION (Semantic Magnets) ---
+# --- CONFIGURATION ---
 _LLAMA_INSTRUCTIONS = (
     "Extract all electrical characteristic tables from this semiconductor datasheet. "
-    "Columns: Parameter, Symbol, Conditions, Value (Min/Typ/Max), Unit. "
-    "Do not merge rows. Keep every row separate. Do not hide engineering data."
+    "Columns: Parameter, Symbol, Conditions, Value, Unit."
 )
 
 _CLEAN_FIXES = {
@@ -51,35 +76,32 @@ _CLEAN_FIXES = {
 # ─────────────────────────────────────────────────────────────────
 
 async def parse_pdf_with_llamaparse(pdf_path: str) -> str:
-    """Hardened extraction: Fails loudly if API key is missing."""
-    api_key = os.getenv("LLAMA_CLOUD_API_KEY")
+    api_key = get_api_key()
     
     if not api_key:
         error_msg = (
-            f"❌ LLAMA_CLOUD_API_KEY is missing! "
-            f"Searched .env at: {env_path}. "
-            f"Check if the key is in the file or if the file exists on your Drive."
+            "❌ LLAMA_CLOUD_API_KEY is missing! \n"
+            "FIX: Go to Colab (Key icon 🔑) and add 'LLAMA_CLOUD_API_KEY' \n"
+            "OR create a .env file in the project root."
         )
         raise ValueError(error_msg)
 
-    print(f"🚀 Starting LlamaParse for: {os.path.basename(pdf_path)}…")
+    print(f"🚀 LlamaParse starting for: {os.path.basename(pdf_path)}")
     
     parser = LlamaParse(
         api_key=api_key,
         result_type="markdown",
         parsing_instruction=_LLAMA_INSTRUCTIONS,
-        max_timeout=5000,
-        verbose=True
+        max_timeout=5000
     )
     
     documents = await parser.aload_data(pdf_path)
-    
     if not documents:
-        raise RuntimeError(f"❌ LlamaParse returned ZERO docs for {pdf_path}")
+        raise RuntimeError(f"❌ No data returned from LlamaParse.")
         
-    md_text = "\n\n".join([doc.text for doc in documents])
-    return md_text
+    return "\n\n".join([doc.text for doc in documents])
 
+# [Rest of the functional processing logic remains the same...]
 # ─────────────────────────────────────────────────────────────────
 # 2. MARKDOWN RECONSTRUCTION
 # ─────────────────────────────────────────────────────────────────
@@ -109,10 +131,6 @@ def extract_tables_from_markdown(md_text: str) -> List[List[List[str]]]:
     if curr_table: tables.append(curr_table)
     return tables
 
-# ─────────────────────────────────────────────────────────────────
-# 3. CHUNKING & SEMANTICS
-# ─────────────────────────────────────────────────────────────────
-
 def process_llamaparse_tables(tables: List[List[List[str]]]) -> List[Chunk]:
     all_chunks = []
     for i, tbl in enumerate(tables):
@@ -134,23 +152,18 @@ def process_llamaparse_tables(tables: List[List[List[str]]]) -> List[Chunk]:
             p, s, c, u = get_cell("parameter"), get_cell("symbol"), get_cell("condition"), get_cell("unit")
             
             p = p if p != "-" else l_p
-            s = s if s != "-" else l_symbol
+            s = s if s != "-" else l_s
             c = c if (c != "-" or p != l_p) else l_c
             u = u if u != "-" else l_unit
             
             if p == "-": continue
             l_p, l_s, l_c, l_u = p, s, c, u
 
-            # Value Resolution
             extracted = resolve_row_values_llamaparse(row, col_map, is_range, u)
             if not extracted: continue
             
             f_unit = extracted.get("unit") or u
-            chunk_text = (
-                f"Parameter: {p}\n"
-                f"Symbol: {s}\n"
-                f"Condition: {c}\n"
-            )
+            chunk_text = f"Parameter: {p}\nSymbol: {s}\nCondition: {c}\n"
             
             if is_range:
                 for k in ["min", "typ", "max"]:
@@ -216,10 +229,6 @@ def clean_cell_llamaparse(text: str) -> str:
         text = re.sub(pattern, repl, text)
     return text if text else "-"
 
-# ─────────────────────────────────────────────────────────────────
-# 4. ENTRY POINT
-# ─────────────────────────────────────────────────────────────────
-
 def run_llamaparse_extraction(pdf_path: str, part_number: str) -> List[Chunk]:
     try:
         try:
@@ -229,12 +238,8 @@ def run_llamaparse_extraction(pdf_path: str, part_number: str) -> List[Chunk]:
             asyncio.set_event_loop(loop)
             
         md_text = loop.run_until_complete(parse_pdf_with_llamaparse(pdf_path))
-        
         tables = extract_tables_from_markdown(md_text)
-        print(f"📊 Found {len(tables)} tables in LlamaParse results.")
-        
         return process_llamaparse_tables(tables)
-        
     except Exception as e:
         print(f"💥 LLAMAPARSE CRITICAL FAILURE: {str(e)}")
         raise
