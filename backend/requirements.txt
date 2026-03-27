@@ -1,4 +1,5 @@
 # ── AI Engine & serving (Quantization Tier) ──────────────────────────────────
+# Using Pure PyTorch Stack for Qwen/Llama
 transformers==4.48.2
 tokenizers==0.21.0
 bitsandbytes>=0.43.0
@@ -9,8 +10,8 @@ torch>=2.2.0
 # ── PDF & Table Parsing (Camelot Tier) ───────────────────────────────────────
 # Replacing Microsoft Table Transformer with Camelot-py
 camelot-py[cv]==0.11.0
-opencv-python-headless
-ghostscript       # Python bridge for Ghostscript
+opencv-python-headless # Headless is critical for preventing CUDA/GUI collisions
+ghostscript
 docling==2.14.0
 pdfplumber==0.11.4
 PyMuPDF==1.25.1
