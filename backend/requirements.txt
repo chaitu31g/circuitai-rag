@@ -1,81 +1,59 @@
-# ── Web framework ─────────────────────────────────────────────────────────────
-fastapi>=0.115.6
-uvicorn[standard]>=0.34.0
-pydantic>=2.11.5
-pydantic-settings==2.7.0
-python-multipart==0.0.19
-requests==2.32.4
-python-dotenv
-PyYAML==6.0.2                 # Fixed to satisfy paddlex/docling compatibility
+# ── AI Engine & Transformers (Pin first to avoid downgrades) ─────────────────
+transformers==4.48.2
+tokenizers==0.21.0
+huggingface-hub>=0.23.0
+torch>=2.2.0
 
-# ── Vector database ───────────────────────────────────────────────────────────
-chromadb>=0.6.3               # Upgraded to 0.6.3 for newer tokenizers compatibility
+# ── Core PDF & Table Parsing (Ingestion Tier) ─────────────────────────────────
+docling==2.14.0
+docling-core==2.0.0
+docling-parse==5.0.0
+docling-ibm-models==3.12.0
+pdfplumber==0.11.4
+PyMuPDF==1.25.1
+timm>=0.9.0
 
-# ── Embedding & Reranking models ──────────────────────────────────────────────
-sentence-transformers>=2.7.0
-
-# ── PDF parsing ───────────────────────────────────────────────────────────────
-docling>=2.81.0
-docling-core
-docling-parse>=5.0.0
-docling-ibm-models>=3.12.0,<4.0.0
-pdfplumber                    # Hybrid Table Parser fallback
-PyMuPDF==1.25.1               # Table region cropping (hybrid_table_parser_v3)
-
-# ── HuggingFace / Transformers stack ─────────────────────────────────────────
-# Versions pinned to satisfy RT-DETR-v2 (transformers >= 4.48) and Chromadb
-transformers>=4.48.2
-tokenizers>=0.21.0
-huggingface-hub>=0.23,<1.0.0
-accelerate>=0.29.0
-bitsandbytes>=0.43.0
-safetensors>=0.4.0
-sentencepiece>=0.1.99
-
-# ── Vision / DePlot / Table Transformer ───────────────────────────────────────
-Pillow>=10.4.0
-numpy>=1.26.0,<2.1.0          # Satisfies tensorflow, numba, and jax
-timm>=0.9.0                   # Table Transformer backbone
-rich<14.0.0                   # Satisfies bigframes in Colab
-fsspec==2025.3.0              # Satisfies datasets in Colab
-
-# ── LlamaIndex integrations ───────────────────────────────────────────────────
-llama-index-core
+# ── Vector DB & RAG (Serving Tier) ────────────────────────────────────────────
+chromadb==0.6.3
+sentence-transformers>=3.0.0
+llama-index-core>=0.12.0
 llama-index-readers-docling
 llama-index-vector-stores-chroma
-llama-index-workflows
 
-# ── Sub-dependencies ──────────────────────────────────────────────────────────
+# ── Web Framework ─────────────────────────────────────────────────────────────
+fastapi>=0.115.0
+uvicorn[standard]>=0.34.0
+pydantic>=2.10.0
+pydantic-settings==2.7.0
+python-dotenv
+python-multipart==0.0.19
+requests==2.32.4
+
+# ── SURGICAL STABILITY PINS (Crucial to resolve conflicts) ───────────────────
+# Fix for: opentelemetry-api 1.40.0 vs <1.39.0
+opentelemetry-api==1.38.0
+opentelemetry-sdk==1.38.0
+opentelemetry-semantic-conventions==0.45b0
+opentelemetry-util-http==0.45b0
+
+# Fix for: typer 0.21.2 vs 0.24.0
+# Typer 0.12.5 is the stable "sweet spot" for docling 2.x and fastapi
+typer==0.12.5
+
+# Fix for missing jedi in ipython
+jedi>=0.19.0
+
+# OS/Core bits
+numpy>=1.26.0,<2.1.0
+Pillow>=10.4.0
+PyYAML==6.0.2
 bcrypt
 build
-chroma-hnswlib
-kubernetes
-posthog
-pypika
-dataclasses-json
-deprecated
-dirtyjson
-filetype
-tinytag
-typing-inspect
-jsonref
-latex2mathml
-deepsearch-glm
-easyocr
 marko
-pypdfium2
-python-docx
-python-pptx
-jsonlines
-banks
 lxml
-typer>=0.12.5,<0.22.0         # docling 2.82 requires <0.22
-pylatexenc
-polyfactory>=2.22.2
-rapidocr>=3.3,<4.0.0
 colorlog
 onnxruntime
-pybase64                      # Required by chromadb 0.6+
-overrides                     # Required by chromadb 0.6+
-httpx                         # Required by chromadb 0.6+
-packaging                     # Used for version verification
+pybase64
+overrides
+httpx
+packaging
