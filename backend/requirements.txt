@@ -26,12 +26,13 @@ python-dotenv
 python-multipart==0.0.19
 requests==2.32.4
 
-# ── UNIFIED OPENTELEMETRY STACK (The Conflict Resolvers) ───────────────────
-# All core opentelemetry components MUST share the same version for stability
+# ── OPENTELEMETRY CORE STABILITY (The Conflict Resolvers) ────────────────────
+# These pins satisfy 'docling < 1.39.0' while keeping 'chromadb' happy
 opentelemetry-api==1.38.0
 opentelemetry-sdk==1.38.0
-opentelemetry-semantic-conventions==1.38.0
-opentelemetry-util-http==1.27.0
+
+# DO NOT pin semantic-conventions or util-http directly. 
+# Let the SDK 1.38.0 resolve its own compatible 0.x.b0 version.
 
 # ── Stability Override for Typer ──
 typer==0.12.5
