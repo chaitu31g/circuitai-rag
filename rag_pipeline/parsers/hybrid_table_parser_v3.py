@@ -134,21 +134,34 @@ _HEADER_KEYWORDS = {
     "note":      "condition",
 }
 
-def map_columns(header_row: List[str]) -> Dict[int, str]:
+def map_columns(grid: List[List[str]]) -> Tuple[int, Dict[int, str]]:
     """
-    Returns {col_index: semantic_name} based on header keywords.
-    Unrecognised columns get "val_N" (treated as numeric later).
+    Scans the first 3 rows of the grid to find the most likely header row.
+    Uses 'partial keyword matching' for robustness.
     """
-    mapping: Dict[int, str] = {}
-    val_counter = 0
-    for i, h in enumerate(header_row):
-        key = h.strip().lower()
-        if key in _HEADER_KEYWORDS:
-            mapping[i] = _HEADER_KEYWORDS[key]
-        else:
-            mapping[i] = f"val_{val_counter}"
-            val_counter += 1
-    return mapping
+    for ri, row in enumerate(grid[:3]):
+        mapping: Dict[int, str] = {}
+        found_keywords = 0
+        
+        # Check every cell in this row against our keyword database
+        for i, cell in enumerate(row):
+            text = cell.strip().lower()
+            if not text:
+                continue
+                
+            for kw, semantic_name in _HEADER_KEYWORDS.items():
+                # partial match: 'symbol' in 'symbol (id)'
+                if kw in text:
+                    mapping[i] = semantic_name
+                    found_keywords += 1
+                    break 
+        
+        # If we found Parameter + at least one other key column, this is our header
+        if any(v == "parameter" for v in mapping.values()) and found_keywords >= 2:
+            return ri, mapping
+            
+    # Default fallback to index 0 if no clear header found
+    return 0, {i: f"val_{i}" for i in range(len(grid[0]) if grid else 0)}
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -273,6 +286,7 @@ def _get_cell(row: List[str], col_map: Dict[int, str], key: str) -> str:
 def create_chunks(
     grid:        List[List[str]],
     col_map:     Dict[int, str],
+    header_idx:  int,
     section:     str,
     part_number: str,
     page_no:     int,
@@ -281,11 +295,8 @@ def create_chunks(
     """Convert a fully built grid into structured Chunk objects."""
     chunks: List[Chunk] = []
 
-    if not grid:
+    if not grid or len(grid) <= header_idx + 1:
         return chunks
-
-    # Use first row as header to build the column map if not already inherited
-    # (col_map already built from detect_header_row)
 
     last_condition = "-"
     last_parameter = "Unknown"
@@ -293,7 +304,7 @@ def create_chunks(
     last_unit      = "-"
     current_section = section.replace("_", " ").title()
 
-    for row in grid[1:]:          # skip header row
+    for row in grid[header_idx + 1:]:          # skip header row and anything above it
         cells = [c.strip() or "-" for c in row]
         if not cells or all(c == "-" for c in cells):
             continue
@@ -526,15 +537,14 @@ def extract_tables_hybrid_v3(
             if not grid:
                 raise ValueError("Camelot returned an empty grid for this region.")
 
-            # ── Header → column map ──────────────────────────────────
-            # Clean text in each cell
+            # ── Header discovery (Scan top rows) ─────────────────
+            # Clean text in each cell first
             clean_grid = [[clean_text(cell) for cell in row] for row in grid]
-            header_row = clean_grid[0]
-            col_map    = map_columns(header_row)
+            header_idx, col_map = map_columns(clean_grid)
 
             # ── Chunk generation ─────────────────────────────────────
             chunks = create_chunks(
-                clean_grid, col_map,
+                clean_grid, col_map, header_idx,
                 region["section"], part_number,
                 region["page_no"], table_num
             )
