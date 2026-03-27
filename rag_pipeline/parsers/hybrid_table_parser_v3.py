@@ -136,32 +136,40 @@ _HEADER_KEYWORDS = {
 
 def map_columns(grid: List[List[str]]) -> Tuple[int, Dict[int, str]]:
     """
-    Scans the first 3 rows of the grid to find the most likely header row.
-    Uses 'partial keyword matching' for robustness.
+    Scans the top of the grid and merges the first 3 rows to identify columns.
+    This handles cases where 'Conditions' is on row 1 and 'Value' is on row 2.
     """
-    for ri, row in enumerate(grid[:3]):
-        mapping: Dict[int, str] = {}
-        found_keywords = 0
-        
-        # Check every cell in this row against our keyword database
-        for i, cell in enumerate(row):
-            text = cell.strip().lower()
-            if not text:
-                continue
+    if not grid:
+        return 0, {}
+
+    mapping: Dict[int, str] = {}
+    last_header_row = 0
+    num_cols = len(grid[0])
+    
+    # Merge text for each column across the first 3 rows
+    merged_headers = [""] * num_cols
+    for ri in range(min(3, len(grid))):
+        for ci in range(min(num_cols, len(grid[ri]))):
+            text = grid[ri][ci].strip().lower()
+            if text:
+                merged_headers[ci] += " " + text
+                last_header_row = ri
+
+    # Map the merged strings to our semantic keywords
+    found_keywords = 0
+    for i, combined_text in enumerate(merged_headers):
+        combined_text = combined_text.strip()
+        for kw, semantic_name in _HEADER_KEYWORDS.items():
+            if kw in combined_text:
+                mapping[i] = semantic_name
+                found_keywords += 1
+                break
                 
-            for kw, semantic_name in _HEADER_KEYWORDS.items():
-                # partial match: 'symbol' in 'symbol (id)'
-                if kw in text:
-                    mapping[i] = semantic_name
-                    found_keywords += 1
-                    break 
-        
-        # If we found Parameter + at least one other key column, this is our header
-        if any(v == "parameter" for v in mapping.values()) and found_keywords >= 2:
-            return ri, mapping
+    # Best guess for where the data actually starts
+    if found_keywords >= 2:
+        return last_header_row, mapping
             
-    # Default fallback to index 0 if no clear header found
-    return 0, {i: f"val_{i}" for i in range(len(grid[0]) if grid else 0)}
+    return 0, {i: f"val_{i}" for i in range(num_cols)}
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -324,10 +332,15 @@ def create_chunks(
         if len(cells) < 3:
             continue
 
-        # --- Semantic Forward Fill Logic ---
+        # --- Semantic Forward Fill & Context Reset ---
         raw_param = _get_cell(cells, col_map, "parameter")
-        if raw_param != "-":
+        if raw_param != "-" and raw_param != last_parameter:
+            # We found a NEW parameter - reset the context to prevent drift
             last_parameter = raw_param
+            last_condition = "-" # Reset condition context for new parameter
+            last_symbol    = "-"
+            last_unit      = "-"
+
         param = last_parameter
 
         raw_symbol = normalize_symbol(_get_cell(cells, col_map, "symbol"))
@@ -343,9 +356,11 @@ def create_chunks(
 
         cond_raw = _get_cell(cells, col_map, "condition")
         if cond_raw != "-":
+            # New condition found for the current parameter
             condition = clean_text(cond_raw)
             last_condition = condition
         else:
+            # Merged cell: inherit from above
             condition = last_condition
 
         raw_unit = _get_cell(cells, col_map, "unit")
