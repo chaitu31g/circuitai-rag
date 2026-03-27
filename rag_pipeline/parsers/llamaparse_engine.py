@@ -1,10 +1,10 @@
 """
-llamaparse_engine.py – Zero-Fail Logic Fix
+llamaparse_engine.py – Hardened Key Loader
 =========================================
 Search Order for API Key:
   1. Google Colab Secrets (userdata)
-  2. Environment Variables (os.getenv)
-  3. Absolute .env path (dotenv)
+  2. Absolute .env path (dotenv with OVERRIDE)
+  3. Environment Variables (os.getenv)
 """
 
 import os
@@ -28,32 +28,32 @@ from ingestion.datasheet_chunker import Chunk
 logger = logging.getLogger(__name__)
 
 def get_api_key() -> str:
-    """Rigorous search for the LLAMA_CLOUD_API_KEY."""
+    """Ultra-Rigorous 3-tier search for the LLAMA_CLOUD_API_KEY."""
     
-    # 1. Look in Colab Secrets (Click Key Icon 🔑 in Colab UI)
+    # Tier 1: .env File (Force Override)
+    # This ensures that even if Python has a 'stale' empty key, we refresh it.
+    env_path = Path(__file__).resolve().parents[2] / ".env"
+    if env_path.exists():
+        load_dotenv(dotenv_path=env_path, override=True)
+        key = os.getenv("LLAMA_CLOUD_API_KEY")
+        if key and key.startswith("llx-") and "YOUR_KEY" not in key:
+            print(f"🔑 DEBUG: Refreshed key from .env at {env_path}")
+            return key
+
+    # Tier 2: Colab Secrets
     if COLAB_AVAILABLE:
         try:
-            val = userdata.get('LLAMA_CLOUD_API_KEY')
-            if val and val.startswith("llx-"):
-                print("🔑 DEBUG: Loaded key from Colab Secrets.")
-                return val
+            key = userdata.get('LLAMA_CLOUD_API_KEY')
+            if key and key.startswith("llx-"):
+                print("🔑 DEBUG: Found key in Colab Secrets.")
+                return key
         except Exception:
             pass
 
-    # 2. Look in Environment Variables (set via os.environ)
-    val = os.getenv("LLAMA_CLOUD_API_KEY")
-    if val and val.startswith("llx-"):
-        print("🔑 DEBUG: Loaded key from Environment Variables.")
-        return val
-        
-    # 3. Look in .env file (Robust path search)
-    env_path = Path(__file__).resolve().parents[2] / ".env"
-    if env_path.exists():
-        load_dotenv(dotenv_path=env_path)
-        val = os.getenv("LLAMA_CLOUD_API_KEY")
-        if val and val.startswith("llx-"):
-            print(f"🔑 DEBUG: Loaded key from .env file at {env_path}")
-            return val
+    # Tier 3: Direct Environment Variable
+    key = os.getenv("LLAMA_CLOUD_API_KEY")
+    if key and key.startswith("llx-") and "YOUR_KEY" not in key:
+        return key
             
     return ""
 
@@ -67,7 +67,8 @@ async def parse_pdf_with_llamaparse(pdf_path: str) -> str:
     if not api_key:
         error_msg = (
             "❌ LLAMA_CLOUD_API_KEY is missing! \n"
-            "FIX: Go to Colab (Key icon 🔑) and add 'LLAMA_CLOUD_API_KEY' with your key."
+            "FIX: Ensure your .env file in the root has 'LLAMA_CLOUD_API_KEY=llx-...' \n"
+            "AND Restart the backend to apply the changes."
         )
         raise ValueError(error_msg)
 
