@@ -370,19 +370,31 @@ def create_chunks(
         
         condition, unit = extract_unit(condition, unit)
 
+        # --- Data Validation Guard ---
         min_val, typ_val, max_val, single_val = _resolve_values(cells, col_map)
+        
+        # If all values are blank or just text (no digits), this is likely a sub-header or note
+        all_vals = f"{min_val}{typ_val}{max_val}{single_val}"
+        if not any(ch.isdigit() for ch in all_vals) and all_vals != "---":
+            # If no digits were found, this is a header or title, skip the chunk
+            continue
 
         chunk_lines = [
             f"Section: {current_section}",
             f"Parameter: {param}",
         ]
-        if symbol != "-": 
+        
+        # Specialized Symbol Normalization for Infineon
+        if symbol != "-" and symbol != "Unknown":
+            # Clean common mis-extractions (e.g. mushed names)
+            symbol = symbol.replace("Cdrain", "ID").replace("Cdrain", "ID")
             chunk_lines.append(f"Symbol: {symbol}")
-        if condition != "-":
+
+        if condition != "-" and len(condition) > 1:
             chunk_lines.append(f"Condition: {condition}")
             
         if single_val != "-":
-            # If the unit was already part of the value, don't duplicate it
+            # Data Integrity: only include if it looks like a value
             if unit != "-" and unit.lower() not in single_val.lower():
                 chunk_lines.append(f"Value: {single_val} {unit}")
             else:
