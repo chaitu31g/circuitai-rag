@@ -111,10 +111,15 @@ def detect_table_structure_camelot(
 # ─────────────────────────────────────────────────────────────────
 _HEADER_KEYWORDS = {
     "parameter": "parameter",
+    "parameters": "parameter",
     "symbol":    "symbol",
+    "symbols":   "symbol",
     "condition": "condition",
+    "conditions": "condition",
     "cond":      "condition",
     "test":      "condition",
+    "test condition": "condition",
+    "test conditions": "condition",
     "min":       "min",
     "min.":      "min",
     "typ":       "typ",
@@ -124,7 +129,7 @@ _HEADER_KEYWORDS = {
     "unit":      "unit",
     "units":     "unit",
     "unite":     "unit",
-    "value":     "value", # Preserve 'Value' name
+    "value":     "value",
     "values":    "value",
     "note":      "condition",
 }
@@ -344,25 +349,24 @@ def create_chunks(
         chunk_lines = [
             f"Section: {current_section}",
             f"Parameter: {param}",
-            f"Symbol: {symbol}" if symbol != "-" else "",
-            f"Condition: {condition}" if condition != "-" else "",
         ]
-        if single_val != "-":
-            chunk_lines.append(f"Value: {single_val}")
-        else:
-            chunk_lines.extend([
-                f"Min: {min_val}",
-                f"Typ: {typ_val}",
-                f"Max: {max_val}",
-            ])
-        if unit == "-" and single_val != "-" and any(u in single_val for u in ("pF","V","A","W")):
-            # Extract unit from Value if the Unit column was missed
-            match = re.search(r'([A-Za-zΩµ°]+)$', single_val)
-            if match:
-                unit = match.group(1)
-                single_val = single_val[:match.start()].strip()
+        if symbol != "-": 
+            chunk_lines.append(f"Symbol: {symbol}")
+        if condition != "-":
+            chunk_lines.append(f"Condition: {condition}")
             
-        row_txt = "\n".join(ln for ln in chunk_lines if ln)
+        if single_val != "-":
+            # If the unit was already part of the value, don't duplicate it
+            if unit != "-" and unit.lower() not in single_val.lower():
+                chunk_lines.append(f"Value: {single_val} {unit}")
+            else:
+                chunk_lines.append(f"Value: {single_val}")
+        else:
+            if min_val != "-": chunk_lines.append(f"Min: {min_val} {unit}" if unit != "-" else f"Min: {min_val}")
+            if typ_val != "-": chunk_lines.append(f"Typ: {typ_val} {unit}" if unit != "-" else f"Typ: {typ_val}")
+            if max_val != "-": chunk_lines.append(f"Max: {max_val} {unit}" if unit != "-" else f"Max: {max_val}")
+
+        row_txt = "\n".join(chunk_lines)
 
         chunks.append(Chunk(
             text=row_txt,
