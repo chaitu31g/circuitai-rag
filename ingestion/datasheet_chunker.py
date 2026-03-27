@@ -605,13 +605,17 @@ def chunk_document(
     has_valid_pdf = pdf_path and Path(pdf_path).exists()
     
     if has_valid_pdf:
-        from rag_pipeline.parsers.hybrid_table_parser_v3 import extract_tables_hybrid_v3
         try:
-            table_chunks = extract_tables_hybrid_v3(str(pdf_path), docling_data, part_number)
-            for tc in table_chunks:
-                _add(tc)
+            from rag_pipeline.parsers.llamaparse_engine import run_llamaparse_extraction
+            table_chunks = run_llamaparse_extraction(str(pdf_path), part_number)
+            if table_chunks:
+                for tc in table_chunks:
+                    _add(tc)
+                logger.info(f"Added {len(table_chunks)} LlamaParse table chunks.")
+            else:
+                has_valid_pdf = False # trigger fallback
         except Exception as e:
-            logger.error(f"Hybrid table parser completely failed for {part_number}: {e}")
+            logger.error(f"LlamaParse completely failed for {part_number}: {e}")
             has_valid_pdf = False  # trigger fallback
 
     if not has_valid_pdf:

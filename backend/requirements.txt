@@ -1,24 +1,19 @@
-# ── AI Engine & Computer Vision ──────────────────────────────────────────────
-transformers==4.48.2
-tokenizers==0.21.0
-bitsandbytes>=0.43.0
-accelerate>=0.29.0
-huggingface-hub>=0.23.0
-torch>=2.2.0
-torchvision>=0.17.0
-Pillow>=10.4.0
+# ── AI Parsing Engine (LlamaParse) ──────────────────────────────────────────
+llama-parse>=0.5.0
+llama-index-core>=0.12.0
+llama-index-readers-file>=0.4.0
 
-# ── Hybrid Table Extraction (DETR + pdfplumber) ─────────────────────────────
-# This replaces Camelot with Microsoft Table Transformer
+# ── Support Utils & Data Handling ───────────────────────────────────────────
 pdfplumber==0.11.4
 PyMuPDF==1.25.1
-docling==2.14.0
+pandas>=2.0.0
+python-dotenv
+marko
+re-vendor
 
 # ── Vector DB & RAG ─────────────────────────────────────────────────────────
 chromadb==0.6.3
 sentence-transformers>=3.0.0
-llama-index-core>=0.12.0
-llama-index-readers-docling
 llama-index-vector-stores-chroma
 
 # ── Web Framework & Stability ───────────────────────────────────────────────
@@ -26,20 +21,16 @@ fastapi>=0.115.0
 uvicorn[standard]>=0.34.0
 pydantic>=2.10.0
 pydantic-settings==2.7.0
-python-dotenv
 python-multipart==0.0.19
 requests==2.32.4
-opentelemetry-api==1.38.0
-opentelemetry-sdk==1.38.0
-typer==0.12.5
+numpy>=1.26.0,<2.1.0
+torch>=2.2.0 --index-url https://download.pytorch.org/whl/cpu
 
 # ── Support Utils & Runtime ──
 jedi>=0.19.0
-numpy>=1.26.0,<2.1.0
 PyYAML==6.0.2
 bcrypt
 build
-marko
 lxml
 colorlog
 onnxruntime
