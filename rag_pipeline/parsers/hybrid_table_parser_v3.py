@@ -94,22 +94,44 @@ def extract_tables_hybrid_v3(
             # --- VISION STAGE ---
             # Crop image at 144 DPI (for high precision detection)
             page_fitz = doc[page_no - 1]
+            h_pdf = page_fitz.rect.height
             scale = 2.0 # 144 / 72
-            # fitz coord is top-down. Do conversion:
-            # bbox (l,t,r,b) in PDF points
-            clip = fitz.Rect(bbox["l"], page_fitz.rect.height - bbox["b"], bbox["r"], page_fitz.rect.height - bbox["t"])
-            pix = page_fitz.get_pixmap(matrix=fitz.Matrix(scale, scale), clip=clip)
+            
+            # Map PDF (bottom-up) to Fitz (top-down)
+            l, t, r, b = bbox["l"], bbox["t"], bbox["r"], bbox["b"]
+            y0, y1 = h_pdf - t, h_pdf - b
+            # Ensure y0 is top (min) and y1 is bottom (max)
+            fitz_rect = fitz.Rect(l, min(y0, y1), r, max(y0, y1))
+            
+            if fitz_rect.width <= 0 or fitz_rect.height <= 0:
+                continue
+
+            pix = page_fitz.get_pixmap(matrix=fitz.Matrix(scale, scale), clip=fitz_rect)
             img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
             
             structure = detect_table_structure(img)
             
             # --- VECTOR STAGE ---
             # Extract words from the same region
-            crop_plumber = pdf.pages[page_no - 1].within_bbox((bbox["l"], page_fitz.rect.height - bbox["b"], bbox["r"], page_fitz.rect.height - bbox["t"]))
+            # (pdfplumber within_bbox expects standard PDF coords [l, b, r, t] or [l, t, r, b] depending on version)
+            # In pdfplumber 0.11+, it's (x0, top, x1, bottom) where top < bottom in PDF points?
+            # No, within_bbox usually takes (l, t, r, b) top-down.
+            crop_plumber = pdf.pages[page_no - 1].within_bbox((l, min(y0, y1), r, max(y0, y1)))
             words = crop_plumber.extract_words(x_tolerance=3, y_tolerance=3)
             
             # --- MAPPING STAGE ---
-            grid = reconstruct_table_from_structure(img.size, structure, words)
+            # Shift words to be RELATIVE to the crop and SCALE to match DETR pixels
+            transformed_words = []
+            for w in words:
+                transformed_words.append({
+                    "text": w["text"],
+                    "x0":   (w["x0"] - l) * scale,
+                    "x1":   (w["x1"] - l) * scale,
+                    "top":  (w["top"] - min(y0, y1)) * scale,
+                    "bottom": (w["bottom"] - min(y0, y1)) * scale
+                })
+
+            grid = reconstruct_table_from_structure(img.size, structure, transformed_words)
             
             # --- CHUNKING STAGE ---
             chunks = create_chunks(grid, part_number, page_no, i)
