@@ -1,2 +1,2 @@
 export const API_BASE_URL =
-  "https://weight-spirituality-telecharger-numerical.trycloudflare.com";
+  "https://gallery-rounds-atom-dee.trycloudflare.com";
