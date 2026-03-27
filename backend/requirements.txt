@@ -26,16 +26,13 @@ python-dotenv
 python-multipart==0.0.19
 requests==2.32.4
 
-# ── OPENTELEMETRY CORE STABILITY (The Conflict Resolvers) ────────────────────
-# These pins satisfy 'docling < 1.39.0' while keeping 'chromadb' happy
+# ── OPENTELEMETRY CORE STABILITY (Docling < 1.39.0) ──────────────────────────
+# These pins remain essential to bridge the two major AI libraries.
 opentelemetry-api==1.38.0
 opentelemetry-sdk==1.38.0
 
-# DO NOT pin semantic-conventions or util-http directly. 
-# Let the SDK 1.38.0 resolve its own compatible 0.x.b0 version.
-
-# ── Stability Override for Typer ──
-typer==0.12.5
+# DO NOT pin Typer directly. 
+# Let the resolver align typer and typer-slim automatically.
 
 # ── Core Utils & Runtime ──
 jedi>=0.19.0
