@@ -16,7 +16,7 @@ import fitz # PyMuPDF
 import torch
 import pdfplumber
 from PIL import Image
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from transformers import DetrImageProcessor, TableTransformerForObjectDetection
 
 from ingestion.datasheet_chunker import Chunk
