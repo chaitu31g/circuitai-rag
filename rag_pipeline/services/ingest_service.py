@@ -119,6 +119,20 @@ def ingest_pdf_pipeline(pdf_path: str, job_id: str) -> None:
         update_job(job_id, status=JobStatus.PROCESSING)
         _log(job_id, f"━━━ Pipeline started for '{original_name}' ━━━")
 
+        # ── STAGE 0: PRE-STAGING ──────────────────────────────────────────
+        # Ensure target directories exist (Safety guard for Drive)
+        PDFS_DIR.mkdir(parents=True, exist_ok=True)
+        DOCLING_DIR.mkdir(parents=True, exist_ok=True)
+        KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
+
+        # Save PDF → pdfs/<original_name> BEFORE parsing starts
+        dest_pdf = PDFS_DIR / original_name
+        shutil.copy2(pdf_file, dest_pdf)
+        _log(job_id, f"│  ✔ PDF   staged → pdfs/{original_name}")
+
+        # Use the staged PDF as the source for the rest of the pipeline
+        pdf_file = dest_pdf
+
         # ── STAGE 1: PARSING ──────────────────────────────────────────────
         update_job(job_id, current_stage=PipelineStage.PARSING)
         _log(job_id, "")
@@ -130,11 +144,6 @@ def ingest_pdf_pipeline(pdf_path: str, job_id: str) -> None:
 
         if not temp_json.exists():
             raise FileNotFoundError(f"PDF parse failed — no JSON at {temp_json}")
-
-        # Save PDF → pdfs/<original_name>
-        dest_pdf = PDFS_DIR / original_name
-        shutil.copy2(pdf_file, dest_pdf)
-        _log(job_id, f"│  ✔ PDF   saved → pdfs/{original_name}")
 
         # Save Docling JSON → docling_output/<clean_stem>.json
         dest_docling = DOCLING_DIR / f"{clean_stem}.json"
