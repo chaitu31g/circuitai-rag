@@ -1,5 +1,4 @@
-# ── AI Engine & serving (Quantization Tier) ──────────────────────────────────
-# Pure PyTorch Stack
+# ── AI Engine & serving ───────────────────────────────────────────────────────
 transformers==4.48.2
 tokenizers==0.21.0
 bitsandbytes>=0.43.0
@@ -7,14 +6,11 @@ accelerate>=0.29.0
 huggingface-hub>=0.23.0
 torch>=2.2.0
 
-# ── PDF & Table Parsing (Camelot Tier) ───────────────────────────────────────
-# Base Camelot + Headless OpenCV for Cloud stability
-camelot-py==0.11.0 
-opencv-python-headless
-ghostscript
-docling==2.14.0
+# ── Pure Coordinate-Based Parsing (Surgical Tier) ────────────────────────────
+# NO Camelot, NO OCR. 
 pdfplumber==0.11.4
 PyMuPDF==1.25.1
+docling==2.14.0
 
 # ── Vector DB & RAG (Serving Tier) ────────────────────────────────────────────
 chromadb==0.6.3

@@ -1,596 +1,258 @@
 """
-hybrid_table_parser_v3.py – Docling + Camelot Hybrid Pipeline
-============================================================
+hybrid_table_parser_v3.py – Surgical pdfplumber Coordinate-Based Parser
+======================================================================
 Architecture:
-  PDF → Docling (section/bbox detection)
-      → Camelot-py (precise lattice/stream extraction)
-      → Column mapping + cleaning
-      → Chunk generation
-      → Fallback: pdfplumber-only 
+  1. Docling → Region Detection (bboxes only)
+  2. pdfplumber → Word-Level Coordinate Extraction {text, x0, top, x1, bottom}
+  3. Spatial Clustering (Y-Axis) → Row Formation
+  4. Header Anchor Discovery (X-Axis) → Column Mapping
+  5. Semantic Multi-Line Merging + Context Forward-Fill
+  6. Final Structuring (Parameter, Symbol, Condition, Value, Unit)
 """
 
 import re
 import logging
-import camelot
+import pdfplumber
 from typing import List, Dict, Any, Optional, Tuple
-from functools import lru_cache
+from collections import defaultdict
 
-from ingestion.datasheet_chunker import _get_table_contexts, _detect_section, _SKIP_TYPES, Chunk
+from ingestion.datasheet_chunker import Chunk
 
 logger = logging.getLogger(__name__)
 
-# ─────────────────────────────────────────────────────────────────
-# 1. TABLE REGION EXTRACTION  (Docling → bbox + section)
-# ─────────────────────────────────────────────────────────────────
-def extract_table_regions(docling_data: dict) -> List[Dict[str, Any]]:
-    """Return one region dict per Docling-detected table."""
-    tables = docling_data.get("tables", [])
-    texts  = docling_data.get("texts",  [])
-    regions: List[Dict[str, Any]] = []
+# --- CONFIGURATION (Coordinate Anchors & Symbols) ---
+_HEADER_SYMBOLS = ["parameter", "symbol", "condition", "value", "unit"]
 
-    for i, tbl in enumerate(tables):
-        prov  = (tbl.get("prov") or [{}])[0]
-        page_no = prov.get("page_no")
-        bbox    = prov.get("bbox")
-        if not page_no or not bbox:
-            continue
-
-        # Normalise bbox → [l, t, r, b]
-        if isinstance(bbox, dict):
-            valid_bbox = [bbox.get("l",0), bbox.get("t",0), bbox.get("r",0), bbox.get("b",0)]
-        else:
-            valid_bbox = list(bbox[:4])
-
-        # Infer section
-        best_sec = "electrical_characteristics"
-        for t in texts:
-            t_page = (t.get("prov") or [{}])[0].get("page_no")
-            if t_page == page_no:
-                d = _detect_section(t.get("text", ""))
-                if d and d not in _SKIP_TYPES:
-                    best_sec = d
-                    break
-
-        regions.append({
-            "table_index":          i,
-            "page_no":              page_no,
-            "bbox":                 valid_bbox,
-            "section":              best_sec,
-        })
-
-    return regions
-
-
-# ─────────────────────────────────────────────────────────────────
-# 2. TABLE STRUCTURE DETECTION  (Camelot-py)
-# ─────────────────────────────────────────────────────────────────
-def detect_table_structure_camelot(
-    pdf_path: str, 
-    page_no: int, 
-    bbox: List[float]
-) -> List[List[str]]:
-    """
-    Run Camelot on the specific table region.
-    `bbox` is [l, t, r, b] in standard PDF coordinates (72 dpi).
-    """
-    try:
-        # Convert Docling bbox to Camelot string format: "x1,y1,x2,y2"
-        # Camelot expects coordinates in standard 72 dpi PDF space.
-        # Docling uses standard PDF origin (bottom-left) for its bboxes.
-        area = f"{bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]}"
-        
-        # Try Lattice mode first (for tables with lines)
-        tables = camelot.read_pdf(
-            pdf_path,
-            pages=str(page_no),
-            flavor='lattice',
-            table_areas=[area]
-        )
-        
-        # If no tables found with Lattice (lines), try Stream (whitespace)
-        if len(tables) == 0:
-            tables = camelot.read_pdf(
-                pdf_path,
-                pages=str(page_no),
-                flavor='stream',
-                table_areas=[area]
-            )
-            
-        if len(tables) > 0:
-            # We take the first table found in the specified area
-            return tables[0].df.values.tolist()
-            
-        return []
-    except Exception as e:
-        logger.warning(f"Camelot extraction failed for page {page_no}: {e}")
-        return []
-
-
-# ─────────────────────────────────────────────────────────────────
-# 3. HEADER DETECTION
-# ─────────────────────────────────────────────────────────────────
-_HEADER_KEYWORDS = {
-    "parameter": "parameter",
-    "parameters": "parameter",
-    "symbol":    "symbol",
-    "symbols":   "symbol",
-    "condition": "condition",
-    "conditions": "condition",
-    "cond":      "condition",
-    "test":      "condition",
-    "test condition": "condition",
-    "test conditions": "condition",
-    "min":       "min",
-    "min.":      "min",
-    "typ":       "typ",
-    "typ.":      "typ",
-    "max":       "max",
-    "max.":      "max",
-    "unit":      "unit",
-    "units":     "unit",
-    "unite":     "unit",
-    "value":     "value",
-    "values":    "value",
-    "note":      "condition",
+# Clean symbols specifically for semiconductor ratings
+_SYMBOL_FIXES = {
+    "I D": "ID", "V GS": "VGS", "V DS": "VDS", "T A": "TA", "T j": "Tj", 
+    "V (BR)DSS": "V(BR)DSS", "RDS (on)": "RDS(on)", "C iss": "Ciss", 
+    "C oss": "Coss", "C rss": "Crss"
 }
 
-def map_columns(grid: List[List[str]]) -> Tuple[int, Dict[int, str]]:
+# ─────────────────────────────────────────────────────────────────
+# 1. CORE COORDINATE-BASED EXTRACTION
+# ─────────────────────────────────────────────────────────────────
+def extract_surgical_table(pdf_path: str, page_no: int, bbox: List[float]) -> List[Dict]:
     """
-    Scans the top of the grid and merges the first 3 rows to identify columns.
-    This handles cases where 'Conditions' is on row 1 and 'Value' is on row 2.
+    Extract every word with precision {x0, top, x1, bottom} using pdfplumber.
+    Coordinates are standard PDF points (0,0 at bottom-left).
     """
-    if not grid:
-        return 0, {}
+    with pdfplumber.open(pdf_path) as pdf:
+        page = pdf.pages[page_no - 1]
+        # Restrict extraction to the table area detected by Docling
+        # pdfplumber bbox: (x0, y0, x1, y1) -> left, top, right, bottom
+        cropped = page.within_bbox((bbox[0], page.height - bbox[3], bbox[2], page.height - bbox[1]))
+        
+        words = cropped.extract_words(keep_blank_chars=False, x_tolerance=3, y_tolerance=3)
+        return sorted(words, key=lambda w: (w["top"], w["x0"]))
 
-    mapping: Dict[int, str] = {}
-    last_header_row = 0
-    num_cols = len(grid[0])
+
+# ─────────────────────────────────────────────────────────────────
+# 2. ROW GROUPING (Y-Clustering)
+# ─────────────────────────────────────────────────────────────────
+def group_words_into_rows(words: List[Dict], row_tolerance: float = 2.0) -> List[List[Dict]]:
+    """
+    Group words within a certain Y-offset into the same Row.
+    """
+    if not words: return []
     
-    # Merge text for each column across the first 3 rows
-    merged_headers = [""] * num_cols
-    for ri in range(min(3, len(grid))):
-        for ci in range(min(num_cols, len(grid[ri]))):
-            text = grid[ri][ci].strip().lower()
-            if text:
-                merged_headers[ci] += " " + text
-                last_header_row = ri
+    rows = []
+    current_row = [words[0]]
+    last_top = words[0]["top"]
+    
+    for w in words[1:]:
+        if abs(w["top"] - last_top) <= row_tolerance:
+            current_row.append(w)
+        else:
+            rows.append(sorted(current_row, key=lambda x: x["x0"]))
+            current_row = [w]
+            last_top = w["top"]
+    
+    if current_row:
+        rows.append(sorted(current_row, key=lambda x: x["x0"]))
+    return rows
 
-    # Map the merged strings to our semantic keywords
-    found_keywords = 0
-    for i, combined_text in enumerate(merged_headers):
-        combined_text = combined_text.strip()
-        for kw, semantic_name in _HEADER_KEYWORDS.items():
-            if kw in combined_text:
-                mapping[i] = semantic_name
-                found_keywords += 1
-                break
-                
-    # Best guess for where the data actually starts
-    if found_keywords >= 2:
-        return last_header_row, mapping
+
+# ─────────────────────────────────────────────────────────────────
+# 3. COLUMN BOUNDARY DETECTION (H-Zoning)
+# ─────────────────────────────────────────────────────────────────
+def detect_column_anchors(rows: List[List[Dict]]) -> Dict[str, Tuple[float, float]]:
+    """
+    Scan top rows to find where Parameter, Symbol, Condition, Value, Unit start/end.
+    Returns {semantic_name: (x0, x1)}
+    """
+    anchors = {}
+    for row in rows[:3]: # Scan top 3 rows for headers
+        for w in row:
+            txt = w["text"].lower().strip()
+            for h in _HEADER_SYMBOLS:
+                if h in txt and h not in anchors:
+                    anchors[h] = (w["x0"] - 5, w["x1"] + 5)
+    
+    # Auto-adjust gaps based on discovered headers
+    if "parameter" in anchors and "symbol" in anchors:
+        # If symbol is to the right of parameter, let parameter expand until symbol
+        anchors["parameter"] = (anchors["parameter"][0], anchors["symbol"][0] - 2)
+        
+    return anchors
+
+
+# ─────────────────────────────────────────────────────────────────
+# 4. DATA MAPPING & MULTI-LINE MERGE
+# ─────────────────────────────────────────────────────────────────
+def process_rows_surgical(rows: List[List[Dict]], anchors: Dict[str, Tuple[float, float]]) -> List[Dict]:
+    """
+    Map every row to a structured dictionary and merge multi-line entries.
+    """
+    structured_data = []
+    last_processed_row = None
+    
+    # Default zone fallback if anchors weren't found clearly
+    # Normalized for a standard 5-column datasheet table
+    zones = {
+        "parameter": anchors.get("parameter", (0, 150)),
+        "symbol":    anchors.get("symbol",    (150, 200)),
+        "condition": anchors.get("condition", (200, 350)),
+        "value":     anchors.get("value",     (350, 480)),
+        "unit":      anchors.get("unit",      (480, 550))
+    }
+
+    last_parameter_str = ""
+    last_symbol_str = ""
+    last_unit_str = ""
+    
+    for row_words in rows:
+        row_content = {"parameter": "", "symbol": "", "condition": "", "value": "", "unit": ""}
+        row_has_data = False
+        
+        for w in row_words:
+            center_x = (w["x0"] + w["x1"]) / 2
+            # Assign word to a zone
+            found_zone = False
+            for zone_name, (z0, z1) in zones.items():
+                if z0 <= center_x <= z1:
+                    row_content[zone_name] = (row_content[zone_name] + " " + w["text"]).strip()
+                    found_zone = True
+                    break
             
-    return 0, {i: f"val_{i}" for i in range(num_cols)}
+            # If word is way out of bounds, attach to nearest zone
+            if not found_zone:
+                 if center_x < zones["parameter"][1]: row_content["parameter"] += " " + w["text"]
+                 elif center_x > zones["unit"][0]:    row_content["unit"] += " " + w["text"]
+
+        # CLEAN SYMBOLS & UNITS
+        row_content["parameter"] = row_content["parameter"].strip()
+        row_content["symbol"]    = _clean_engine_text(row_content["symbol"])
+        row_content["condition"] = _clean_engine_text(row_content["condition"])
+        row_content["value"]     = row_content["value"].strip()
+        row_content["unit"]      = row_content["unit"].strip()
+
+        # REJECT HEADER ROWS
+        if any(h in row_content["parameter"].lower() for h in _HEADER_SYMBOLS):
+            continue
+
+        # MULTI-LINE PARAMETER MERGE
+        # If this row ONLY has a parameter name (no value), it's a split line
+        if row_content["parameter"] and not row_content["value"] and not row_content["condition"]:
+            last_parameter_str = (last_parameter_str + " " + row_content["parameter"]).strip()
+            continue
+        
+        # FORWARD-FILL MERGED CELLS
+        if not row_content["parameter"]: row_content["parameter"] = last_parameter_str
+        else: last_parameter_str = row_content["parameter"]
+        
+        if not row_content["symbol"]:    row_content["symbol"] = last_symbol_str
+        else: last_symbol_str = row_content["symbol"]
+        
+        if not row_content["unit"]:      row_content["unit"] = last_unit_str
+        else: last_unit_str = row_content["unit"]
+
+        # Only accept rows with a value or condition
+        if any(ch.isdigit() for ch in row_content["value"]) or row_content["condition"]:
+            structured_data.append(row_content.copy())
+
+    return structured_data
 
 
-# ─────────────────────────────────────────────────────────────────
-# 7. TEXT CLEANING
-# ─────────────────────────────────────────────────────────────────
-def clean_text(text: str) -> str:
-    """General OCR-noise removal for symbols and conditions."""
-    if not text:
-        return "-"
-    text = text.strip()
-
-    # Known OCR subscript re-attachments
-    text = re.sub(r'\bC\s*([iors])ss\b', r'C\1ss', text) # C iss -> Ciss
-    text = re.sub(r'\bt\s*d\s*\(',      'td(',     text) # t d ( -> td(
-    text = re.sub(r'\bR\s*DS\(on\)',     'Rds(on)', text, flags=re.I)
-    text = re.sub(r'\bV\s*GS\(th\)',     'Vgs(th)', text, flags=re.I)
-    text = re.sub(r'\bV\s*(GS|DS)\b',   r'V\1',    text, flags=re.I)
-    text = re.sub(r'\bI\s*D\b',         'ID',      text, flags=re.I)
-    text = re.sub(r'(\d+)\s+([A-Za-zΩµ°%]+)\b', r'\1\2', text) # 10 V -> 10V
-    
-    # Scientific notation 10 0 -> 10^0
-    text = re.sub(r'\b10\s+(\d)\b', r'10^\1', text)
-    
-    # Merged symbols
-    text = text.replace("CpF", "pF").replace("V_DSV", "Vds").replace("VDSV", "Vds")
-    
-    # Remove internal double spaces
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text or "-"
-    text = re.sub(r'\bI\s+D\b',      'ID',      text)
-
-    # Scientific notation 10 0 -> 10^0
-    text = re.sub(r'\b10\s+(\d)\b', r'10^\1', text)
-    
-    # Merged units
-    text = re.sub(r'\bCpF\b', 'pF', text)
-    text = re.sub(r'\bV_DSV\b', 'Vds', text)
-    text = re.sub(r'([a-zA-Z])(\d)', r'\1 \2', text) # Split e.g. T25 -> T 25
-    text = text.replace("V _GS=0 V", "Vgs=0V")
-    
+def _clean_engine_text(text: str) -> str:
+    """Fix common semiconductor OCR artifacts."""
+    for bad, good in _SYMBOL_FIXES.items():
+        text = text.replace(bad, good)
+    # Join isolated characters in symbols ID, VGS, etc.
+    text = re.sub(r'\b([A-Z])\s+([A-Z])\b', r'\1\2', text)
     return text.strip() or "-"
 
 
-def normalize_symbol(symbol: str) -> str:
-    if not symbol or symbol == "-": return "-"
-    s = symbol.strip().replace(" ", "").replace("Cdsc", "C").replace("IDdsc", "ID")
-    return s
-
-
-def extract_unit(condition: str, current_unit: str) -> Tuple[str, str]:
-    unit_re = r'\s+(pF|nF|uF|F|ns|us|ms|s|MHz|kHz|Hz|mV|V|mA|uA|A|mW|W|mΩ|Ω|°C)$'
-    m = re.search(unit_re, condition, re.IGNORECASE)
-    if m:
-        if current_unit == "-":
-            current_unit = m.group(1)
-        condition = condition[:m.start()].strip()
-    return condition or "-", current_unit
-
-
-def is_section_header_row(row: List[str]) -> bool:
-    if not row:
-        return False
-    cells = [c.strip() for c in row if c]
-    if not cells: return False
-    
-    # Check for "Figure X", "Table X", "Typ. X"
-    first = cells[0].lower()
-    if re.search(r'\b(figure|fig\.|typ\.|diagram|characteristic)\b', first):
-        return True
-    
-    # Generic section header: a single occupied cell
-    non_empty = [c for c in row if c and c != "-"]
-    return len(non_empty) == 1 and len(cells) > 3
-
-
 # ─────────────────────────────────────────────────────────────────
-# 8. ROW PROCESSING HELPERS
+# 5. MAIN ENTRYPOINT
 # ─────────────────────────────────────────────────────────────────
-def _resolve_values(row: List[str], col_map: Dict[int, str]):
-    """
-    Pull min/typ/max/value from named columns.
-    """
-    named = {name: "-" for name in ["min","typ","max","value"]}
-    val_cols = []
-
-    for ci, name in col_map.items():
-        if ci >= len(row):
-            continue
-        v = row[ci].strip() or "-"
-        if name in named:
-            named[name] = v
-        elif name.startswith("val_"):
-            val_cols.append(v)
-
-    # Special case: if we have 'value' column, prefer it over positional
-    if named["value"] != "-":
-        return "-", "-", "-", named["value"]
-
-    # Positional fallback for unlabeled tables
-    if all(v == "-" for v in [named["min"], named["typ"], named["max"]]):
-        actives = [v for v in val_cols if v != "-"]
-        if len(actives) >= 3:
-            named["min"], named["typ"], named["max"] = actives[0], actives[1], actives[2]
-        elif len(actives) == 2:
-            named["typ"], named["max"] = actives[0], actives[1]
-        elif len(actives) == 1:
-            named["typ"] = actives[0]
-
-    return named["min"], named["typ"], named["max"], "-"
-
-
-def _get_cell(row: List[str], col_map: Dict[int, str], key: str) -> str:
-    for ci, name in col_map.items():
-        if name == key and ci < len(row):
-            return row[ci].strip() or "-"
-    return "-"
-
-
-# ─────────────────────────────────────────────────────────────────
-# 11. CHUNK GENERATION
-# ─────────────────────────────────────────────────────────────────
-def create_chunks(
-    grid:        List[List[str]],
-    col_map:     Dict[int, str],
-    header_idx:  int,
-    section:     str,
-    part_number: str,
-    page_no:     int,
-    table_number: int,
-) -> List[Chunk]:
-    """Convert a fully built grid into structured Chunk objects."""
-    chunks: List[Chunk] = []
-
-    if not grid or len(grid) <= header_idx + 1:
-        return chunks
-
-    last_condition = "-"
-    last_parameter = "Unknown"
-    last_symbol    = "-"
-    last_unit      = "-"
-    current_section = section.replace("_", " ").title()
-
-    for row in grid[header_idx + 1:]:          # skip header row and anything above it
-        cells = [c.strip() or "-" for c in row]
-        if not cells or all(c == "-" for c in cells):
-            continue
-            
-        # --- Graph Suppression Logic (Anti-Hallucination) ---
-        # Graphs often produce rows like ['1E-03', '10ms', '1E-02']. We must reject these.
-        num_exponential = sum(1 for c in cells if re.search(r'E[+-]?\d{2}', c))
-        num_numeric     = sum(1 for c in cells if any(ch.isdigit() for ch in c))
-        num_text_heavy  = sum(1 for c in cells if len([ch for ch in c if ch.isalpha()]) > 3)
-
-        # If more than 2 cells have scientific notation or the row is 80% numeric with NO text
-        if num_exponential >= 2 or (num_numeric > 0 and num_text_heavy == 0):
-             # This is clearly a graph axis or coordinate grid, not a data row
-             continue
-
-        # Ignore axis-heavy graph data (too many numbers/too wide)
-        if len(cells) > 10 and num_numeric > 8:
-            continue
-            
-        if is_section_header_row(cells):
-            current_section = cells[0]
-            last_condition = "-"
-            last_parameter = "Unknown"
-            last_symbol = "-"
-            last_unit = "-"
-            continue
-        if len(cells) < 3:
-            continue
-
-        # --- Semantic Forward Fill & Context Reset ---
-        raw_param = _get_cell(cells, col_map, "parameter")
-        if raw_param != "-" and raw_param != last_parameter:
-            # We found a NEW parameter - reset the context to prevent drift
-            last_parameter = raw_param
-            last_condition = "-" # Reset condition context for new parameter
-            last_symbol    = "-"
-            last_unit      = "-"
-
-        param = last_parameter
-
-        raw_symbol = normalize_symbol(_get_cell(cells, col_map, "symbol"))
-        if raw_symbol != "-":
-            last_symbol = raw_symbol
-        symbol = last_symbol
-        
-        # Correction for parameter name drift
-        if symbol in ("Ciss", "Coss", "Crss", "C") and "current" in param.lower():
-            param = "Capacitance"
-        elif symbol in ("ID", "Id") and "capacitance" in param.lower():
-            param = "Continuous drain current"
-
-        cond_raw = _get_cell(cells, col_map, "condition")
-        if cond_raw != "-":
-            # New condition found for the current parameter
-            condition = clean_text(cond_raw)
-            last_condition = condition
-        else:
-            # Merged cell: inherit from above
-            condition = last_condition
-
-        raw_unit = _get_cell(cells, col_map, "unit")
-        if raw_unit != "-":
-            last_unit = raw_unit
-        unit = last_unit
-        
-        condition, unit = extract_unit(condition, unit)
-
-        # --- Data Validation Guard ---
-        min_val, typ_val, max_val, single_val = _resolve_values(cells, col_map)
-        
-        # If all values are blank or just text (no digits), this is likely a sub-header or note
-        all_vals = f"{min_val}{typ_val}{max_val}{single_val}"
-        if not any(ch.isdigit() for ch in all_vals) and all_vals != "---":
-            # If no digits were found, this is a header or title, skip the chunk
-            continue
-
-        chunk_lines = [
-            f"Section: {current_section}",
-            f"Parameter: {param}",
-        ]
-        
-        # Specialized Symbol Normalization for Infineon
-        if symbol != "-" and symbol != "Unknown":
-            # Clean common mis-extractions (e.g. mushed names)
-            symbol = symbol.replace("Cdrain", "ID").replace("Cdrain", "ID")
-            chunk_lines.append(f"Symbol: {symbol}")
-
-        if condition != "-" and len(condition) > 1:
-            chunk_lines.append(f"Condition: {condition}")
-            
-        if single_val != "-":
-            # Data Integrity: only include if it looks like a value
-            if unit != "-" and unit.lower() not in single_val.lower():
-                chunk_lines.append(f"Value: {single_val} {unit}")
-            else:
-                chunk_lines.append(f"Value: {single_val}")
-        else:
-            if min_val != "-": chunk_lines.append(f"Min: {min_val} {unit}" if unit != "-" else f"Min: {min_val}")
-            if typ_val != "-": chunk_lines.append(f"Typ: {typ_val} {unit}" if unit != "-" else f"Typ: {typ_val}")
-            if max_val != "-": chunk_lines.append(f"Max: {max_val} {unit}" if unit != "-" else f"Max: {max_val}")
-
-        row_txt = "\n".join(chunk_lines)
-
-        chunks.append(Chunk(
-            text=row_txt,
-            chunk_type="parameter_row",
-            metadata={
-                "type":         "table_row",
-                "chunk_type":   "parameter_row",
-                "part_number":  part_number,
-                "section":      section,
-                "table_number": table_number,
-                "page":         page_no,
-                "parameter":    param,
-            }
-        ))
-
-    return chunks
-
-
-# ─────────────────────────────────────────────────────────────────
-# 12. FALLBACK  (pdfplumber-only extraction)
-# ─────────────────────────────────────────────────────────────────
-def _unmerge_multiline_row(row):
-    """Expand pdfplumber rows with multi-line cells. Protects Param/Symbol/Unit columns."""
-    cells = [str(c).strip() if c is not None else "" for c in row]
-    value_lines = [len(c.split('\n')) for c in cells[3:-1] if c]
-    max_val_lines = max(value_lines) if value_lines else 1
-    if max_val_lines <= 1:
-        return [[c.replace('\n', ' ').replace('  ', ' ').strip() for c in cells]]
-    expanded = []
-    for i in range(max_val_lines):
-        new_row = []
-        for col_idx, c in enumerate(cells):
-            lines = [l.strip() for l in c.split('\n')]
-            if col_idx in (0, 1, len(cells) - 1):
-                new_row.append(" ".join(l for l in lines if l) if i == 0 else "")
-            else:
-                if len(lines) == max_val_lines:
-                    new_row.append(lines[i])
-                else:
-                    new_row.append(" ".join(l for l in lines if l) if i == 0 else "")
-        expanded.append(new_row)
-    return expanded
-
-
-def _pdfplumber_fallback(pdf_path, region, part_number, table_number) -> List[Chunk]:
-    """
-    Fallback when Table Transformer fails: extract table directly with pdfplumber
-    using line-based grid detection.
-    """
-    from rag_pipeline.utils.parameter_extractor import _scrub_and_ffill
-
-    all_chunks: List[Chunk] = []
-    try:
-        with pdfplumber.open(pdf_path) as pdf:
-            page = pdf.pages[region["page_no"] - 1]
-            pr = region.get("page_rect")
-            cropped = page.within_bbox((pr.x0, pr.y0, pr.x1, pr.y1)) if pr else page
-
-            for pt in cropped.find_tables():
-                data = pt.extract()
-                if not data or len(data) < 2:
-                    continue
-                headers = [str(c).replace('\n', ' ').strip() if c else "" for c in data[0]]
-                clean_rows = []
-                for row in data[1:]:
-                    clean_rows.extend(_unmerge_multiline_row(row))
-                rows_to_process = _scrub_and_ffill(clean_rows, headers)
-
-                last_condition = "-"
-                current_section = region["section"].replace("_", " ").title()
-                for r in rows_to_process:
-                    row = [str(x).strip() if x is not None and str(x).strip() != "" else "-" for x in r]
-                    if not row or all(x == "-" for x in row):
-                        continue
-                    if is_section_header_row(row):
-                        current_section = row[0]
-                        last_condition = "-"
-                        continue
-                    if len(row) < 4:
-                        continue
-                    param = row[0] if row[0] != "-" else "Unknown"
-                    symbol = normalize_symbol(row[1])
-                    condition = row[2]
-                    if condition == "-":
-                        condition = last_condition
-                    else:
-                        condition = clean_text(condition)
-                        last_condition = condition
-                    unit = row[-1]
-                    condition, unit = extract_unit(condition, unit)
-                    active_vals = [v for v in row[3:-1] if v != "-"]
-                    min_val, typ_val, max_val, single_val = "-", "-", "-", "-"
-                    
-                    # Logic: if only one value column or header mapping suggests 'Value'
-                    if len(row) == 5: # Param, Symbol, Cond, Value, Unit
-                        single_val = row[3]
-                    elif len(active_vals) >= 3:
-                        min_val, typ_val, max_val = active_vals[0], active_vals[1], active_vals[2]
-                    elif len(active_vals) == 2:
-                        typ_val, max_val = active_vals[0], active_vals[1]
-                    elif len(active_vals) == 1:
-                        typ_val = active_vals[0]
-
-                    chunk_lines = [
-                        f"Section: {current_section}",
-                        f"Parameter: {param}",
-                        f"Symbol: {symbol}" if symbol != "-" else "",
-                        f"Condition: {condition}" if condition != "-" else "",
-                    ]
-                    if single_val != "-":
-                        chunk_lines.append(f"Value: {single_val}")
-                    else:
-                        chunk_lines.extend([
-                            f"Min: {min_val}", f"Typ: {typ_val}", f"Max: {max_val}"
-                        ])
-                    if unit != "-":
-                        chunk_lines.append(f"Unit: {unit}")
-                    
-                    row_txt = "\n".join(ln for ln in chunk_lines if ln)
-                    all_chunks.append(Chunk(
-                        text=row_txt,
-                        chunk_type="parameter_row",
-                        metadata={
-                            "type": "table_row", "chunk_type": "parameter_row",
-                            "part_number": part_number, "section": region["section"],
-                            "table_number": table_number, "page": region["page_no"],
-                            "parameter": param,
-                        }
-                    ))
-    except Exception as e:
-        logger.warning(f"Fallback extraction failed for table {table_number}: {e}")
-    return all_chunks
-
-
-
 def extract_tables_hybrid_v3(
     pdf_path:     str,
     docling_data: dict,
     part_number:  str,
 ) -> List[Chunk]:
     """
-    Full pipeline: Docling (detection) → Camelot (extraction) → Chunks.
-    Falls back to simple pdfplumber if Camelot yields nothing.
+    Primary Entry Point: Strategic Coordinate-Based Parsing.
     """
     all_chunks: List[Chunk] = []
-    regions = extract_table_regions(docling_data)
-
-    for region in regions:
-        table_num = region["table_index"] + 1
+    
+    # 1. Get Table regions from Docling
+    tables = docling_data.get("tables", [])
+    
+    for i, tbl in enumerate(tables):
+        prov = (tbl.get("prov") or [{}])[0]
+        page_no = prov.get("page_no")
+        bbox    = prov.get("bbox")
+        if not page_no or not bbox: continue
+        
+        # Convert dictionary bbox to list if needed
+        if isinstance(bbox, dict):
+            bbox_list = [bbox.get("l",0), bbox.get("t",0), bbox.get("r",0), bbox.get("b",0)]
+        else:
+            bbox_list = list(bbox[:4])
 
         try:
-            # ── Camelot extraction within Docling region ─────────────
-            grid = detect_table_structure_camelot(
-                pdf_path, region["page_no"], region["bbox"]
-            )
-
-            if not grid:
-                raise ValueError("Camelot returned an empty grid for this region.")
-
-            # ── Header discovery (Scan top rows) ─────────────────
-            # Clean text in each cell first
-            clean_grid = [[clean_text(cell) for cell in row] for row in grid]
-            header_idx, col_map = map_columns(clean_grid)
-
-            # ── Chunk generation ─────────────────────────────────────
-            chunks = create_chunks(
-                clean_grid, col_map, header_idx,
-                region["section"], part_number,
-                region["page_no"], table_num
-            )
-            all_chunks.extend(chunks)
-            logger.info(f"Table {table_num} (page {region['page_no']}): {len(chunks)} chunks via Camelot.")
+            # 2. Extract words with coords
+            words = extract_surgical_table(pdf_path, page_no, bbox_list)
+            
+            # 3. Form Rows
+            grouped_rows = group_words_into_rows(words)
+            
+            # 4. Map Columns
+            anchors = detect_column_anchors(grouped_rows)
+            
+            # 5. Process & Structure
+            final_data = process_rows_surgical(grouped_rows, anchors)
+            
+            # 6. Convert to RAG Chunks
+            for record in final_data:
+                # Deduplicate parameter name if it merged redundantly
+                param = record["parameter"].replace("Continuous drain current Continuous drain current", "Continuous drain current")
+                
+                # Format text exactly for RAG
+                chunk_text = (
+                    f"Parameter: {param}\n"
+                    f"Symbol: {record['symbol']}\n"
+                    f"Condition: {record['condition']}\n"
+                    f"Value: {record['value']}\n"
+                    f"Unit: {record['unit']}"
+                )
+                
+                all_chunks.append(Chunk(
+                    text=chunk_text,
+                    chunk_type="parameter_row",
+                    metadata={
+                        "part_number": part_number,
+                        "page": page_no,
+                        "parameter": param,
+                        "table_index": i
+                    }
+                ))
+            
+            logger.info(f"Surgically extracted {len(final_data)} rows from Table {i+1} on page {page_no}.")
 
         except Exception as e:
-            logger.warning(f"Camelot failed for table {table_num} on page {region['page_no']}: {e}. Falling back to pdfplumber.")
-            fb = _pdfplumber_fallback(pdf_path, region, part_number, table_num)
-            all_chunks.extend(fb)
+            logger.error(f"Surgical extraction failed for Table {i}: {e}")
 
     return all_chunks
