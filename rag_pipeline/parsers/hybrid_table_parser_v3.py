@@ -192,35 +192,29 @@ def find_best_box(v0, v1, spans):
     return -1
 
 # ─────────────────────────────────────────────────────────────────
-# 3. SEMANTIC PROCESSING
+# 3. POST-PROCESSING & CLEANING
 # ─────────────────────────────────────────────────────────────────
 def create_chunks(grid: List[List[str]], part_number: str, page_no: int, table_idx: int) -> List[Chunk]:
     if not grid or len(grid) < 2: return []
     
-    # 1. Clean entire grid
-    clean_grid = [[clean_cell(cell) for cell in row] for row in grid]
-    
-    # 2. Map columns (Parameter, Symbol, Conditions, Value, Unit)
-    # Using keywords from your request
-    # Header is typically row 0 or 1
-    header = clean_grid[0]
+    # 1. Map columns and DETECT FORMAT
+    header = [clean_cell(h) for h in grid[0]]
     col_map = map_columns(header)
+    is_range_table = any(k in ["min", "typ", "max"] and col_map.get(k, -1) != -1 for k in ["min", "typ", "max"])
     
     chunks = []
-    last_param = "-"
-    last_symbol = "-"
-    last_cond = "-"
+    last_param, last_symbol, last_cond, last_unit = "-", "-", "-", "-"
     
-    for row in clean_grid[1:]:
-        if all(cell == "-" or not cell for cell in row): continue
+    for row in grid[1:]:
+        clean_row = [clean_cell(c) for c in row]
+        if all(c == "-" or not c for c in clean_row): continue
         
-        # Map values
-        p = row[col_map["parameter"]] if col_map["parameter"] != -1 else "-"
-        s = row[col_map["symbol"]] if col_map["symbol"] != -1 else "-"
-        c = row[col_map["condition"]] if col_map["condition"] != -1 else "-"
-        u = row[col_map["unit"]] if col_map["unit"] != -1 else "-"
+        # --- Context Inheritance ---
+        p = clean_row[col_map["parameter"]] if col_map["parameter"] != -1 else "-"
+        s = clean_row[col_map["symbol"]] if col_map["symbol"] != -1 else "-"
+        c = clean_row[col_map["condition"]] if col_map["condition"] != -1 else "-"
+        u = clean_row[col_map["unit"]] if col_map["unit"] != -1 else "-"
         
-        # Forward-fill if empty
         if p == "-" or not p: p = last_param
         else: last_param = p
         
@@ -229,27 +223,78 @@ def create_chunks(grid: List[List[str]], part_number: str, page_no: int, table_i
         
         if c == "-" or not c: c = last_cond
         else: last_cond = c
+        
+        if u == "-" or not u: u = last_unit
+        else: last_unit = u
 
-        # Multi-column value resolution (min, typ, max)
-        v_str = resolve_values(row, col_map)
+        # --- Value Extraction & Unit Splitting ---
+        extracted = resolve_values_structured(clean_row, col_map, is_range_table, u)
+        if not extracted: continue
+
+        # Clean Condition Leakage (Remove trailing unit from condition)
+        final_unit = extracted.get("unit") or u
+        if final_unit != "-" and c.endswith(final_unit):
+            c = c[: -len(final_unit)].strip()
+
+        # --- Text Construction ---
+        chunk_lines = [f"Parameter: {p}", f"Symbol: {s}", f"Condition: {c}"]
         
-        if v_str == "-": continue
-        
-        chunk_text = (
-            f"Parameter: {p}\n"
-            f"Symbol: {s}\n"
-            f"Condition: {c}\n"
-            f"Value: {v_str}\n"
-            f"Unit: {u}"
-        )
+        if is_range_table:
+            if extracted.get("min"): chunk_lines.append(f"Min: {extracted['min']}")
+            if extracted.get("typ"): chunk_lines.append(f"Typ: {extracted['typ']}")
+            if extracted.get("max"): chunk_lines.append(f"Max: {extracted['max']}")
+        else:
+            chunk_lines.append(f"Value: {extracted.get('value', '-')}")
+            
+        if final_unit != "-":
+            chunk_lines.append(f"Unit: {final_unit}")
         
         chunks.append(Chunk(
-            text=chunk_text,
+            text="\n".join(chunk_lines),
             chunk_type="parameter_row",
             metadata={"source": "table", "page": page_no, "table_index": table_idx}
         ))
         
     return chunks
+
+def resolve_values_structured(row, col_map, is_range, default_unit) -> Dict[str, str]:
+    res = {}
+    if is_range:
+        for k in ["min", "typ", "max"]:
+            if col_map.get(k, -1) != -1 and row[col_map[k]] != "-":
+                val, unt = split_value_unit(row[col_map[k]])
+                res[k] = val
+                if unt != "-": res["unit"] = unt
+    else:
+        # Single Value Mode
+        # Search for a column labeled 'value' or just the first numeric column after symbols
+        val_idx = col_map.get("value", -1)
+        if val_idx == -1:
+            # Fallback scan: look for the first numeric column after 'symbol' or 'condition'
+            start_scan_idx = max(col_map.get("symbol", -1), col_map.get("condition", -1)) + 1
+            for i, cell in enumerate(row):
+                if i >= start_scan_idx and any(ch.isdigit() for ch in cell):
+                    val_idx = i
+                    break
+        
+        if val_idx != -1 and row[val_idx] != "-":
+            val, unt = split_value_unit(row[val_idx])
+            res["value"] = val
+            if unt != "-": res["unit"] = unt
+            
+    return res
+
+def split_value_unit(text: str) -> Tuple[str, str]:
+    """Surgically split 0.23 A -> (0.23, A)"""
+    if not text or text == "-": return "-", "-"
+    # Match number (including sci notation) followed by optional space then text unit
+    # This regex is designed to capture the numeric part and the remaining part as unit.
+    # It handles cases like "1.23", "1.23A", "1.23 A", "-5", "1e-3", "1.23 V/A"
+    match = re.search(r"^([-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)\s*(.*)$", text.strip())
+    if match:
+        val, unt = match.groups()
+        return val.strip(), unt.strip() or "-"
+    return text.strip(), "-"
 
 def clean_cell(text: str) -> str:
     text = text.strip()
@@ -258,7 +303,7 @@ def clean_cell(text: str) -> str:
     return text if text else "-"
 
 def map_columns(header: List[str]) -> Dict[str, int]:
-    mapping = {"parameter": 0, "symbol": 1, "condition": 2, "min": -1, "typ": -1, "max": -1, "unit": -1}
+    mapping = {"parameter": -1, "symbol": -1, "condition": -1, "min": -1, "typ": -1, "max": -1, "unit": -1, "value": -1}
     for i, h in enumerate(header):
         low = h.lower()
         if "param" in low: mapping["parameter"] = i
@@ -267,12 +312,8 @@ def map_columns(header: List[str]) -> Dict[str, int]:
         elif "min" in low: mapping["min"] = i
         elif "typ" in low: mapping["typ"] = i
         elif "max" in low: mapping["max"] = i
+        elif "val" in low: mapping["value"] = i
         elif "unit" in low: mapping["unit"] = i
-    return mapping
-
-def resolve_values(row, col_map) -> str:
-    vals = []
-    if col_map["min"] != -1 and row[col_map["min"]] != "-": vals.append(f"Min: {row[col_map['min']]}")
     if col_map["typ"] != -1 and row[col_map["typ"]] != "-": vals.append(f"Typ: {row[col_map['typ']]}")
     if col_map["max"] != -1 and row[col_map["max"]] != "-": vals.append(f"Max: {row[col_map['max']]}")
     
