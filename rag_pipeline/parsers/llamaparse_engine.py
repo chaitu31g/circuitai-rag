@@ -13,11 +13,15 @@ import re
 import logging
 import asyncio
 from typing import List, Dict, Any, Optional, Tuple
+from pathlib import Path
 from dotenv import load_dotenv
 from llama_parse import LlamaParse
 
-# Load environment variables from .env file
-load_dotenv()
+# Robust .env loading for Colab/Drives
+# llamaparse_engine.py is in rag_pipeline/parsers/
+# .env is in project root (2 levels up)
+env_path = Path(__file__).resolve().parents[2] / ".env"
+load_dotenv(dotenv_path=env_path)
 
 from ingestion.datasheet_chunker import Chunk
 
