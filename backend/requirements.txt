@@ -9,7 +9,6 @@ PyMuPDF==1.25.1
 pandas>=2.0.0
 python-dotenv
 marko
-re-vendor
 
 # ── Vector DB & RAG ─────────────────────────────────────────────────────────
 chromadb==0.6.3
