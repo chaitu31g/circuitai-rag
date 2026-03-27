@@ -1,14 +1,13 @@
-# ── AI Engine & Transformers (Pin first to avoid downgrades) ─────────────────
+# ── AI Engine & Transformers (Strict Pins) ──────────────────────────────────
+# Pin these first to ensure they aren't downgraded by other libraries
 transformers==4.48.2
 tokenizers==0.21.0
 huggingface-hub>=0.23.0
 torch>=2.2.0
 
-# ── Core PDF & Table Parsing (Ingestion Tier) ─────────────────────────────────
+# ── PDF & Table Parsing (Docling Managed) ────────────────────────────────────
+# ONLY pin the main package. Let it decide its own -core, -parse, and -models.
 docling==2.14.0
-docling-core==2.0.0
-docling-parse==5.0.0
-docling-ibm-models==3.12.0
 pdfplumber==0.11.4
 PyMuPDF==1.25.1
 timm>=0.9.0
@@ -20,7 +19,7 @@ llama-index-core>=0.12.0
 llama-index-readers-docling
 llama-index-vector-stores-chroma
 
-# ── Web Framework ─────────────────────────────────────────────────────────────
+# ── Web Framework & Pydantic ──────────────────────────────────────────────────
 fastapi>=0.115.0
 uvicorn[standard]>=0.34.0
 pydantic>=2.10.0
@@ -29,21 +28,18 @@ python-dotenv
 python-multipart==0.0.19
 requests==2.32.4
 
-# ── SURGICAL STABILITY PINS (Crucial to resolve conflicts) ───────────────────
-# Fix for: opentelemetry-api 1.40.0 vs <1.39.0
+# ── SURGICAL STABILITY OVERRIDES (The Conflict Resolvers) ───────────────────
+# These solve the 'opentelemetry-api 1.40.0 vs <1.39.0' issue
 opentelemetry-api==1.38.0
 opentelemetry-sdk==1.38.0
 opentelemetry-semantic-conventions==0.45b0
 opentelemetry-util-http==0.45b0
 
-# Fix for: typer 0.21.2 vs 0.24.0
-# Typer 0.12.5 is the stable "sweet spot" for docling 2.x and fastapi
+# This solves the 'typer 0.21.2 vs 0.24.0' issue
 typer==0.12.5
 
-# Fix for missing jedi in ipython
+# Ensure stable environment tools
 jedi>=0.19.0
-
-# OS/Core bits
 numpy>=1.26.0,<2.1.0
 Pillow>=10.4.0
 PyYAML==6.0.2
