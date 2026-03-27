@@ -605,18 +605,23 @@ def chunk_document(
     has_valid_pdf = pdf_path and Path(pdf_path).exists()
     
     if has_valid_pdf:
+        # LlamaParse is MANDATORY for table structure. 
+        # If it fails, we crash to prevent silent data corruption.
         try:
             from rag_pipeline.parsers.llamaparse_engine import run_llamaparse_extraction
             table_chunks = run_llamaparse_extraction(str(pdf_path), part_number)
-            if table_chunks:
-                for tc in table_chunks:
-                    _add(tc)
-                logger.info(f"Added {len(table_chunks)} LlamaParse table chunks.")
-            else:
-                has_valid_pdf = False # trigger fallback
+            
+            for tc in table_chunks:
+                _add(tc)
+                
+            logger.info(f"Successfully integrated {len(table_chunks)} LlamaParse table chunks.")
+            
+        except ImportError:
+            logger.error("LlamaParse engine not installed. ❌")
+            raise
         except Exception as e:
-            logger.error(f"LlamaParse completely failed for {part_number}: {e}")
-            has_valid_pdf = False  # trigger fallback
+            logger.error(f"💥 LlamaParse REQUIRED extraction failed: {e}")
+            raise # Stop the pipeline
 
     if not has_valid_pdf:
         # Fallback to standard docling-only extraction

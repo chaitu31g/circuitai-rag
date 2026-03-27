@@ -1,11 +1,11 @@
 """
-llamaparse_engine.py – Semiconductor-Specific LlamaParse Engine
+llamaparse_engine.py – Production-Grade LlamaParse Integration
 ==============================================================
-Architecture:
-  1. LlamaParse → Markdown Tables
-  2. Markdown → Structured JSON (List[Dict])
-  3. Semantic Washing (ID, Vds/Vgs, T=25C)
-  4. Context Inheritance (Forward-fill parameter/symbol)
+Hardened Features:
+  1. Strict API Key Validation (Throws ValueError)
+  2. Zero-Tolerance for Silent Failures
+  3. Structured Markdown-to-JSON Reconstruction
+  4. Semiconductor-Specific Cleaning (ID, Vds, Vgs, T=25C)
 """
 
 import os
@@ -14,20 +14,17 @@ import logging
 import asyncio
 from typing import List, Dict, Any, Optional, Tuple
 from llama_parse import LlamaParse
-from llama_index.core import SimpleDirectoryReader
 
 from ingestion.datasheet_chunker import Chunk
 
 logger = logging.getLogger(__name__)
 
-# --- PARSING INSTRUCTION ---
+# --- STRICT INSTRUCTIONS ---
 _LLAMA_INSTRUCTIONS = (
-    "Extract all electrical characteristic tables from this semiconductor datasheet. "
-    "Ensure tables have columns: 'Parameter', 'Symbol', 'Conditions' (or 'Test Condition'), "
-    "'min', 'typ', 'max', and 'Unit'. "
-    "If a parameter has multiple rows of conditions (e.g. TA=25C and TA=70C), "
-    "ensure the parameter name is repeated or can be inferred easily from context. "
-    "Do not hallucinate data. Preserve exact engineering symbols like ID, Vds, Vgs, and temperature values."
+    "Extract all semiconductor characteristic tables from this datasheet. "
+    "MANDATORY COLUMNS: Parameter, Symbol, Conditions (or Test Conditions), Value (or Min/Typ/Max), and Unit. "
+    "Do not merge rows. Keep every row separate. Ensure conditions like 'TA=25C' are preserved accurately. "
+    "Do NOT hide technical values. Extract every numeric value and its unit."
 )
 
 _CLEAN_FIXES = {
@@ -40,16 +37,25 @@ _CLEAN_FIXES = {
 }
 
 # ─────────────────────────────────────────────────────────────────
-# 1. LLAMAPARSE CORE
+# 1. HARDENED PARSER CORE
 # ─────────────────────────────────────────────────────────────────
 
 async def parse_pdf_with_llamaparse(pdf_path: str) -> str:
-    """Extract full markdown from PDF using LlamaCloud API."""
+    """Hardened extraction: Fails loudly if API key is missing or extraction is empty."""
     api_key = os.getenv("LLAMA_CLOUD_API_KEY")
-    if not api_key:
-        logger.error("LLAMA_CLOUD_API_KEY missing from environment!")
-        return ""
     
+    if not api_key:
+        error_msg = (
+            "❌ LLAMA_CLOUD_API_KEY is missing! "
+            "Ingestion cannot continue without an API key. "
+            "Please set it in your environment variables or Colab secrets."
+        )
+        logger.error(error_msg)
+        raise ValueError(error_msg)
+
+    print(f"🚀 Using LlamaParse for table extraction: {os.path.basename(pdf_path)}…")
+    
+    # Initialize LlamaParse
     parser = LlamaParse(
         api_key=api_key,
         result_type="markdown",
@@ -58,16 +64,26 @@ async def parse_pdf_with_llamaparse(pdf_path: str) -> str:
         verbose=True
     )
     
-    # We use sync wrapper 'load_data' which calls async internally or is part of Reader
+    # Run extraction
     documents = await parser.aload_data(pdf_path)
-    return "\n\n".join([doc.text for doc in documents])
+    
+    if not documents:
+        raise RuntimeError(f"❌ LlamaParse returned ZERO documents for {pdf_path}")
+        
+    print(f"✅ Extracted {len(documents)} document sections from LlamaParse.")
+    md_text = "\n\n".join([doc.text for doc in documents])
+    
+    if "|" not in md_text:
+        logger.warning(f"⚠️ No markdown tables (pipes) found in LlamaParse output for {pdf_path}")
+        
+    return md_text
 
 # ─────────────────────────────────────────────────────────────────
 # 2. MARKDOWN RECONSTRUCTION
 # ─────────────────────────────────────────────────────────────────
 
 def extract_tables_from_markdown(md_text: str) -> List[List[List[str]]]:
-    """Parse Markdown text to identify and split individual tables."""
+    """Surgical split of markdown table strings into 2D lists."""
     tables = []
     lines = md_text.split("\n")
     curr_table = []
@@ -75,17 +91,11 @@ def extract_tables_from_markdown(md_text: str) -> List[List[List[str]]]:
     
     for line in lines:
         if "|" in line:
-            # We don't want the separator line '---|---|---'
             if "-|-" in line or "|---" in line:
                 in_table = True
                 continue
-            
-            # Extract row values
-            row = [c.strip() for c in line.split("|") if c.strip() or (line.startswith("|") and line.endswith("|"))]
-            # Fix for empty cells being filtered out by split logic
-            # This is a bit simpler:
             row = [c.strip() for c in line.split("|")][1:-1]
-            if not row: continue
+            if not row or all(not c for c in row): continue
             
             curr_table.append(row)
             in_table = True
@@ -99,60 +109,60 @@ def extract_tables_from_markdown(md_text: str) -> List[List[List[str]]]:
     return tables
 
 # ─────────────────────────────────────────────────────────────────
-# 3. SEMANTIC CLEANING & CHUNKING
+# 3. CHUNKING & SEMANTICS
 # ─────────────────────────────────────────────────────────────────
 
-def process_llamaparse_tables(tables: List[List[List[str]]], part_number: str) -> List[Chunk]:
+def process_llamaparse_tables(tables: List[List[List[str]]]) -> List[Chunk]:
     all_chunks = []
     for i, tbl in enumerate(tables):
         if len(tbl) < 2: continue
         
-        # 1. Map columns (Param, Symbol, Cond, etc.) from the first row (header)
         header = tbl[0]
         col_map = map_columns_llamaparse(header)
         is_range = any(k in ["min", "typ", "max"] for k in col_map.keys() if col_map[k] != -1)
         
         last_p, last_s, last_c, last_u = "-", "-", "-", "-"
         
-        # 2. Iterate data rows
         for row in tbl[1:]:
-            # Ensure row has enough cells
             if not any(row): continue
             
-            # Helper to get value or '-'
             def get_cell(key):
                 idx = col_map.get(key, -1)
                 return clean_cell_llamaparse(row[idx]) if idx != -1 and idx < len(row) else "-"
 
             p, s, c, u = get_cell("parameter"), get_cell("symbol"), get_cell("condition"), get_cell("unit")
             
-            # --- CONTEXT INHERITANCE ---
+            # Forward-fill context
             p = p if p != "-" else last_p
             s = s if s != "-" else last_s
-            c = c if (c != "-" or p != last_p) else last_c # Only inherit condition if parameter is same
+            c = c if (c != "-" or p != last_p) else last_c
             u = u if u != "-" else last_unit
             
-            if p == "-": continue # Skip rows with no parameter context
+            if p == "-": continue # No parameter context
             
             last_p, last_s, last_c, last_u = p, s, c, u
 
-            # --- VALUE RESOLUTION ---
+            # Value Splitting (0.23 A -> 0.23, A)
             extracted = resolve_row_values_llamaparse(row, col_map, is_range, u)
             if not extracted: continue
             
-            final_unit = extracted.get("unit") or u
-            chunk_lines = [f"Parameter: {p}", f"Symbol: {s}", f"Condition: {c}"]
+            f_unit = extracted.get("unit") or u
+            chunk_text = (
+                f"Parameter: {p}\n"
+                f"Symbol: {s}\n"
+                f"Condition: {c}\n"
+            )
             
             if is_range:
                 for k in ["min", "typ", "max"]:
-                    if extracted.get(k): chunk_lines.append(f"{k.capitalize()}: {extracted[k]}")
+                    if extracted.get(k): chunk_text += f"{k.capitalize()}: {extracted[k]}\n"
             else:
-                chunk_lines.append(f"Value: {extracted.get('value', '-')}")
+                chunk_text += f"Value: {extracted.get('value', '-')}\n"
             
-            if final_unit != "-": chunk_lines.append(f"Unit: {final_unit}")
+            if f_unit != "-": chunk_text += f"Unit: {f_unit}"
             
             all_chunks.append(Chunk(
-                text="\n".join(chunk_lines),
+                text=chunk_text.strip(),
                 chunk_type="parameter_row",
                 metadata={"source": "llamaparse", "table_index": i}
             ))
@@ -172,7 +182,7 @@ def map_columns_llamaparse(header: List[str]) -> Dict[str, int]:
         elif "unit" in low: mapping["unit"] = i
         elif "val" in low: mapping["value"] = i
     
-    # Defaults if header is missing
+    # Position fallbacks for Infineon datasheets
     if mapping["parameter"] == -1: mapping["parameter"] = 0
     if mapping["symbol"] == -1: mapping["symbol"] = 1
     return mapping
@@ -182,13 +192,13 @@ def resolve_row_values_llamaparse(row, col_map, is_range, default_unit) -> Dict[
     if is_range:
         for k in ["min", "typ", "max"]:
             idx = col_map[k]
-            if idx != -1 and idx < len(row) and row[idx] != "-" and row[idx].strip():
+            if idx != -1 and idx < len(row) and row[idx].strip() not in ["-", ""]:
                 val, unt = split_value_unit_llamaparse(row[idx])
                 res[k] = val
                 if unt != "-": res["unit"] = unt
     else:
         v_idx = col_map.get("value", col_map.get("typ", -1))
-        if v_idx != -1 and v_idx < len(row) and row[v_idx] != "-" and row[v_idx].strip():
+        if v_idx != -1 and v_idx < len(row) and row[v_idx].strip() not in ["-", ""]:
             val, unt = split_value_unit_llamaparse(row[v_idx])
             res["value"] = val
             if unt != "-": res["unit"] = unt
@@ -209,15 +219,12 @@ def clean_cell_llamaparse(text: str) -> str:
     return text if text else "-"
 
 # ─────────────────────────────────────────────────────────────────
-# 4. WRAPPER FOR CHUNKER
+# 4. ENTRY POINT
 # ─────────────────────────────────────────────────────────────────
 
 def run_llamaparse_extraction(pdf_path: str, part_number: str) -> List[Chunk]:
-    """Top-level entry point for the new LlamaParse pipeline."""
-    logger.info(f"Starting LlamaParse extraction for {pdf_path}…")
-    
+    """Zero-Probability Fallback Entry Point."""
     try:
-        # We need an event loop if not running in one
         try:
             loop = asyncio.get_event_loop()
         except RuntimeError:
@@ -225,15 +232,17 @@ def run_llamaparse_extraction(pdf_path: str, part_number: str) -> List[Chunk]:
             asyncio.set_event_loop(loop)
             
         md_text = loop.run_until_complete(parse_pdf_with_llamaparse(pdf_path))
-        if not md_text:
-            return []
         
         tables = extract_tables_from_markdown(md_text)
-        logger.info(f"Extracted {len(tables)} tables from LlamaParse Markdown.")
+        print(f"📊 Found {len(tables)} tables in LlamaParse results.")
         
-        return process_llamaparse_tables(tables, part_number)
+        chunks = process_llamaparse_tables(tables)
+        
+        if not chunks:
+            raise RuntimeError(f"❌ LlamaParse succeeded but yielded ZERO parameter chunks for {pdf_path}")
+            
+        return chunks
         
     except Exception as e:
-        logger.error(f"LlamaParse extraction failed: {str(e)}", exc_info=True)
-        return []
-
+        print(f"💥 LLAMAPARSE CRITICAL FAILURE: {str(e)}")
+        raise # Rethrow to stop the pipeline
