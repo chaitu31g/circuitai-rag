@@ -13,7 +13,11 @@ import re
 import logging
 import asyncio
 from typing import List, Dict, Any, Optional, Tuple
+from dotenv import load_dotenv
 from llama_parse import LlamaParse
+
+# Load environment variables from .env file
+load_dotenv()
 
 from ingestion.datasheet_chunker import Chunk
 
