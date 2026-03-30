@@ -23,8 +23,10 @@ class ChromaStore(VectorStore):
         self._collection_name  = collection_name
         self._expected_dim     = expected_dim
 
+        from chromadb.config import Settings
         self._client = chromadb.PersistentClient(
-            path=str(self.persist_dir)
+            path=str(self.persist_dir),
+            settings=Settings(anonymized_telemetry=False)
         )
 
         self._collection = self._get_or_recreate_collection()
@@ -114,20 +116,15 @@ class ChromaStore(VectorStore):
     # -------------------------------------------------
     # QUERY  (satisfies abstract method)
     # -------------------------------------------------
-    def _get_all_collections(self):
-        cols = self._client.list_collections()
-        return [self._client.get_collection(c.name if hasattr(c, "name") else c) for c in cols]
-
     def query(
         self,
         query_embedding: List[float],
         n_results: int = 5,
         filters: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
-        """Multi-Collection Nearest-neighbour search. Spans all component collections."""
+        """Multi-Collection Nearest-neighbour search."""
         collections_to_search = []
         
-        # Determine target collections based on filter
         comp_target = None
         if filters and "component" in filters:
             inner = filters["component"]
@@ -137,10 +134,13 @@ class ChromaStore(VectorStore):
                 comp_target = inner
                 
         if comp_target:
-            try: collections_to_search.append(self._client.get_collection(comp_target))
+            try: collections_to_search.append(self._client.get_collection(name=comp_target))
             except: pass
         else:
-            collections_to_search = self._get_all_collections()
+            try:
+                collections = self._client.list_collections()
+                collections_to_search = [self._client.get_collection(name=name) for name in collections]
+            except: pass
             
         local_filters = {k: v for k, v in filters.items() if k != "component"} if filters else None
         if not local_filters: local_filters = None
@@ -192,9 +192,9 @@ class ChromaStore(VectorStore):
     def delete_component(self, part_number: str) -> int:
         """Delete entire collection directly."""
         try:
-            col = self._client.get_collection(part_number)
+            col = self._client.get_collection(name=part_number)
             count = col.count()
-            self._client.delete_collection(part_number)
+            self._client.delete_collection(name=part_number)
             return count
         except: return 0
 
@@ -202,31 +202,31 @@ class ChromaStore(VectorStore):
     # COUNT
     # -------------------------------------------------
     def count(self) -> int:
-        return sum(col.count() for col in self._get_all_collections())
+        try:
+            collections = self._client.list_collections()
+            return sum(self._client.get_collection(name=name).count() for name in collections)
+        except Exception:
+            return 0
 
     # -------------------------------------------------
     # LIBRARY — unique components in the collection
     # -------------------------------------------------
     def get_library(self) -> List[Dict[str, Any]]:
-        collections = self._get_all_collections()
-        library = []
-        for col in collections:
-            count = col.count()
-            if count == 0: continue
+        try:
+            collections = self._client.list_collections()
+        except Exception as e:
+            raise RuntimeError(f"Failed to load collections: {e}")
             
-            types = set()
-            try:
-                res = col.get(limit=count, include=["metadatas"])
-                for m in (res.get("metadatas", []) or []):
-                    types.add(m.get("type", m.get("chunk_type", "text")))
-            except: pass
-            
-            library.append({
-                "component_id": col.name,
-                "chunk_count": count,
-                "chunk_types": sorted(types)
+        result = []
+        for name in collections:
+            collection = self._client.get_collection(name=name)
+            result.append({
+                "component_id": name,
+                "chunk_count": collection.count(),
+                "chunk_types": ["text", "table", "figure"]
             })
-        return sorted(library, key=lambda x: x["component_id"])
+            
+        return sorted(result, key=lambda x: x["component_id"])
 
     # -------------------------------------------------
     # RAW COLLECTION ACCESS (Optional helper)

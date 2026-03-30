@@ -105,9 +105,13 @@ def ingest_pdf_pipeline(pdf_path: str, job_id: str) -> None:
     from backend.models import get_job
     job = get_job(job_id)
     
-    # If the job is missing, use the filename stem as the ultimate source of truth
-    # to avoid 'unknown' collections or metadata.
     original_name = job.file_name if job else pdf_file.name
+    
+    # Strip the 37-character UUID prefix if it exists (format: UUID_...)
+    import re
+    if re.match(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}_", original_name):
+        original_name = original_name[37:]
+        
     clean_stem    = Path(original_name).stem.replace(" ", "_").replace("/", "")
     part_number   = clean_stem
 
