@@ -62,41 +62,39 @@ def get_api_key() -> str:
 _STRICT_SEMICONDUCTOR_INSTRUCTION = (
     "Extract all semiconductor characteristic and rating tables strictly.\n"
     "Schema Rules:\n"
-    "1. Tables MUST have columns: Parameter | Symbol | Conditions | Value | Unit.\n"
-    "2. If the source uses Min/Typ/Max, use: Parameter | Symbol | Conditions | Min | Typ | Max | Unit.\n"
-    "3. Repeat the 'Parameter' and 'Symbol' name for every row that belongs to them (un-merge cells).\n"
-    "4. Preserve exact numeric values and units (e.g., 25 °C, V_DS=100V).\n"
-    "5. Do NOT split symbols like ID into I D. Keep them as written.\n"
-    "6. If a value is missing, use '-'.\n"
+    "1. Columns: Parameter | Symbol | Conditions | Value | Unit.\n"
+    "2. If Min/Typ/Max exist, use: Parameter | Symbol | Conditions | Min | Typ | Max | Unit.\n"
+    "3. Repeat labels for every row (un-merge cells).\n"
+    "4. DO NOT USE LATEX for symbols. Use plain text (ID, VGS, TA, TJ).\n"
+    "5. NO backslashes in symbols. NO underscores like I\\_D. ALWAYS USE plain characters.\n"
+    "6. If a symbol is missing, use '-'.\n"
 )
 
 async def parse_pdf_with_llamaparse(pdf_path: str) -> str:
+    # ── [Existing API Key validation - kept same for brevity] ────────────────
     api_key = get_api_key()
-    
-    if not api_key:
-        error_msg = (
-            "❌ LLAMA_CLOUD_API_KEY is missing! \n"
-            "FIX: Ensure your .env file in the root has 'LLAMA_CLOUD_API_KEY=llx-...' \n"
-            "AND Restart the backend to apply the changes."
-        )
-        raise ValueError(error_msg)
+    if not api_key: raise ValueError("❌ LLAMA_CLOUD_API_KEY is missing!")
 
     print(f"🚀 LlamaParse starting for: {os.path.basename(pdf_path)}")
     
-    # Use system_prompt_append to avoid deprecation warnings and improve quality
     parser = LlamaParse(
         api_key=api_key,
         result_type="markdown",
         system_prompt_append=_STRICT_SEMICONDUCTOR_INSTRUCTION,
         max_timeout=5000,
-        use_vendor_multimodal_model=True, # Best for table structure
+        use_vendor_multimodal_model=True,
     )
     
     documents = await parser.aload_data(pdf_path)
-    if not documents:
-        raise RuntimeError("❌ No data returned from LlamaParse.")
-        
-    return "\n\n".join([doc.text for doc in documents])
+    if not documents: raise RuntimeError("❌ No data returned from LlamaParse.")
+    
+    md_text = "\n\n".join([doc.text for doc in documents])
+    
+    # ── De-LaTeX Post-Processor ──────────────────────────────────────────────
+    # LlamaParse often emits symbols as 'I\_D' or 'V\_GS' which confuses RAG.
+    md_text = md_text.replace("\\_", "_").replace("\\ ", " ")
+    md_text = re.sub(r"([a-zA-Z])\\([a-zA-Z])", r"\1\2", md_text)
+    return md_text
 
 def extract_tables_from_markdown(md_text: str) -> List[List[List[str]]]:
     tables = []

@@ -216,27 +216,37 @@ def ingest_pdf_pipeline(pdf_path: str, job_id: str) -> None:
 
         # ── STAGE 4: STORING ──────────────────────────────────────────────
         update_job(job_id, current_stage=PipelineStage.STORING)
+        # Stage 4: STORAGE — CONSOLIDATED GLOBAL STORE
         _log(job_id, "")
         _log(job_id, "┌─ Stage 4/4 · ChromaDB Storage")
 
-        # Flatten metadata before storing to avoid ChromaDB type errors
+        # Flatten metadata before storing to avoid ChromaDB metadata type errors
         for chunk in embedded:
             chunk["metadata"] = _flatten_metadata(chunk.get("metadata", {}))
 
         store = ChromaStore(
             persist_dir=Path(config.chroma_persist_dir),
-            collection_name=config.chroma_collection, # Global collection
+            collection_name=config.chroma_collection, # Consolidate into global 'datasheets'
             expected_dim=dim or 1024,
         )
+
+        # ── AUTO-CLEANUP ──────────────────────────────────────────────────────
+        # Delete ANY existing data for this component ID (or PDF name) to prevent 
+        # database growth and 'stale' duplicates across re-runs.
+        _log(job_id, f"│  Cleaning existing data for '{part_number}'…")
+        store.delete_component(part_number)
+        
+        # Also clean by 'component' tag to be safe with older schema
+        store.collection.delete(where={"component": part_number})
+        
         before = store.count()
         store.upsert_chunks(embedded)
         store.persist()
         after = store.count()
 
-        _log(job_id, f"│  Collection : '{config.chroma_collection}'")
-        _log(job_id, f"│  Before     : {before} vectors")
-        _log(job_id, f"│  Upserted   : {len(embedded)} vectors")
-        _log(job_id, f"│  After      : {after} vectors total")
+        _log(job_id, f"│  Global Collection : '{config.chroma_collection}'")
+        _log(job_id, f"│  Collection size   : {after} chunks")
+        _log(job_id, f"│  Upserted          : {len(embedded)} chunks")
 
         update_job(job_id, stage_completed=PipelineStage.STORING)
         _log(job_id, "└─ Storing complete ✔")
