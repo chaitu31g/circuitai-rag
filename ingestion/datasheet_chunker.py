@@ -223,6 +223,8 @@ def chunk_table(
         chunk_type="table",
         metadata={
             "part_number":   part_number,
+            "component":     part_number,
+            "type":          "table",
             "section_name":  section_name,
             "table_number":  table_number,
             "table_title":   f"{section_label} — {param_names[:60]}",
@@ -407,6 +409,8 @@ def chunk_section(
     for i, part in enumerate(parts):
         meta: dict = {
             "part_number":  part_number,
+            "component":     part_number,
+            "type":          "semantic",
             "section_name": section_name,
             "priority":     priority,
         }
@@ -523,8 +527,11 @@ def chunk_document(
     tables   = docling_data.get("tables",   [])
     pictures = docling_data.get("pictures", [])
 
-    if not part_number:
-        part_number = _extract_part_number(texts) or "unknown"
+    if not part_number or part_number == "unknown":
+        extracted = _extract_part_number(texts)
+        if not extracted:
+            raise ValueError("Component part number could not be extracted and was not provided. Ingestion aborted to prevent 'unknown' data.")
+        part_number = extracted
 
     all_chunks:  list[Chunk] = []
     seen_texts:  set[str]   = set()   # dedup on full chunk text

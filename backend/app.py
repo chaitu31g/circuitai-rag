@@ -747,7 +747,7 @@ def delete_library_component(component_id: str):
     try:
         store = ChromaStore(
             persist_dir=Path(config.chroma_persist_dir),
-            collection_name=config.chroma_collection,
+            collection_name=component_id,
         )
         deleted_count = store.delete_component(component_id)
 

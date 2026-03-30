@@ -109,42 +109,116 @@ def extract_tables_from_markdown(md_text: str) -> List[List[List[str]]]:
     if curr_table: tables.append(curr_table)
     return tables
 
-def process_llamaparse_tables(tables: List[List[List[str]]]) -> List[Chunk]:
+def process_llamaparse_tables(tables: List[List[List[str]]], part_number: str) -> List[Chunk]:
+    """Process LlamaParse markdown tables into validated, deduplicated chunks."""
     all_chunks = []
-    _CLEAN_FIXES = {r"\bI\s+D\b": "ID", r"\bt\s+d\(off\)\b": "td(off)", r"T\s*=\s*25\s*°C": "T=25°C", r"T\s*=\s*70\s*°C": "T=70°C"}
+    seen_rows = set() # (parameter, symbol, condition, value)
+    
+    # ── Noise removal regex ──────────────────────────────────────────────────
+    # Removes engineering noise like "GS", "j" and normalized multiple spaces
+    def clean_engineering_text(text: str) -> str:
+        if not text or text == "-": return "-"
+        # Remove common noise patterns seen in LlamaParse datasheet output (e.g., "GS j")
+        text = re.sub(r"\bGS\b", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\bj\b", "", text, flags=re.IGNORECASE)
+        # Normalize spacing
+        text = re.sub(r"\s+", " ", text).strip()
+        return text or "-"
+
+    _CLEAN_FIXES = {
+        r"\bI\s+D\b": "ID", 
+        r"\bt\s+d\(off\)\b": "td(off)", 
+        r"T\s*=\s*25\s*°C": "T=25°C", 
+        r"T\s*=\s*70\s*°C": "T=70°C"
+    }
     
     for i, tbl in enumerate(tables):
-        if len(tbl) < 2: continue
+        if len(tbl) < 2: continue # Needs header + at least 1 row
+        
         header = tbl[0]
         col_map = map_columns_llamaparse(header)
+        
+        # ── Strict Table Structure Enforcement ────────────────────────────────
+        # Must have: Parameter, Symbol, Conditions, and a value column
+        # Skip if any core column is missing.
+        required_cols = ["parameter", "symbol", "condition"]
+        has_required = all(col_map[k] != -1 for k in required_cols)
+        has_value = any(col_map[k] != -1 for k in ["value", "min", "typ", "max"])
+        
+        if not (has_required and has_value):
+            logger.warning(f"Skipping Table {i} — missing required columns (Parameter, Symbol, Conditions, or Value).")
+            continue
+
         is_range = any(k in ["min", "typ", "max"] for k in col_map.keys() if col_map[k] != -1)
         l_p, l_s, l_c, l_u = "-", "-", "-", "-"
         
         for row in tbl[1:]:
             if not any(row): continue
+            
             def get_cell(key):
                 idx = col_map.get(key, -1)
                 txt = row[idx].strip() if idx != -1 and idx < len(row) else "-"
-                for p, r in _CLEAN_FIXES.items(): txt = re.sub(p, r, txt)
+                for p, r in _CLEAN_FIXES.items(): 
+                    txt = re.sub(p, r, txt)
                 return txt
             
-            p, s, c, u = get_cell("parameter"), get_cell("symbol"), get_cell("condition"), get_cell("unit")
-            p, s, c, u = (p if p != "-" else l_p), (s if s != "-" else l_s), (c if (c != "-" or p != l_p) else l_c), (u if u != "-" else l_u)
-            if p == "-": continue
+            # Extract raw values
+            raw_p, raw_s, raw_c, raw_u = get_cell("parameter"), get_cell("symbol"), get_cell("condition"), get_cell("unit")
+            
+            # Forward-fill logic
+            p = raw_p if raw_p != "-" else l_p
+            s = raw_s if raw_s != "-" else l_s
+            c = raw_c if (raw_c != "-" or raw_p != l_p) else l_c
+            u = raw_u if raw_u != "-" else l_u
+            
+            # ── Clean Condition Text ──────────────────────────────────────────
+            c = clean_engineering_text(c)
+            
+            if p == "-" or p == "": continue
             l_p, l_s, l_c, l_u = p, s, c, u
             
             extr = resolve_row_values_llamaparse(row, col_map, is_range, u)
             if not extr: continue
+            
+            # Determine primary value for validation and deduplication
+            val_str = str(extr.get("value", extr.get("typ", extr.get("max", extr.get("min", "-")))))
+            
+            # ── Validation: Skip rows where core info is missing or empty ──────
+            if p == "-" or s == "-" or val_str == "-" or val_str == "":
+                continue
+                
+            # ── Deduplication ────────────────────────────────────────────────
+            # Use unique key: (parameter, symbol, condition, value)
+            row_key = (p.lower(), s.lower(), c.lower(), val_str.lower())
+            if row_key in seen_rows:
+                continue
+            seen_rows.add(row_key)
             
             f_u = extr.get("unit") or u
             ctext = f"Parameter: {p}\nSymbol: {s}\nCondition: {c}\n"
             if is_range:
                 for k in ["min", "typ", "max"]: 
                     if extr.get(k): ctext += f"{k.capitalize()}: {extr[k]}\n"
-            else: ctext += f"Value: {extr.get('value', '-')}\n"
+            else: 
+                ctext += f"Value: {val_str}\n"
+            
             if f_u != "-": ctext += f"Unit: {f_u}"
             
-            all_chunks.append(Chunk(text=ctext.strip(), chunk_type="parameter_row", metadata={"source": "llamaparse", "table_index": i}))
+            # ── Metadata ────────────────────────────────────────────────────
+            # Ensure component is never missing and matches PDF name
+            metadata = {
+                "component":     part_number,
+                "part_number":   part_number,
+                "type":          "table",
+                "chunk_type":    "parameter_row",
+                "source":        "llamaparse",
+                "table_index":   i,
+                "parameter":     p,
+                "symbol":        s
+            }
+            
+            all_chunks.append(Chunk(text=ctext.strip(), chunk_type="parameter_row", metadata=metadata))
+            
     return all_chunks
 
 def map_columns_llamaparse(header: List[str]) -> Dict[str, int]:
@@ -188,5 +262,5 @@ def run_llamaparse_extraction(pdf_path: str, part_number: str) -> List[Chunk]:
         try: loop = asyncio.get_event_loop()
         except RuntimeError: loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
         md = loop.run_until_complete(parse_pdf_with_llamaparse(pdf_path))
-        return process_llamaparse_tables(extract_tables_from_markdown(md))
+        return process_llamaparse_tables(extract_tables_from_markdown(md), part_number)
     except Exception as e: print(f"💥 LLAMAPARSE CRITICAL FAILURE: {str(e)}"); raise
