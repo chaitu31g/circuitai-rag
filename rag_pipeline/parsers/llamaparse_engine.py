@@ -132,30 +132,40 @@ def process_llamaparse_tables(tables: List[List[List[str]]], part_number: str) -
     # ── Ultimate Symbol & Condition Normalizer ──────────────────────────────
     def normalize_symbol(sym: str) -> str:
         if not sym or sym == "-": return "-"
-        sym = sym.strip()
+        
+        # Aggressive De-LaTeX and noise removal
+        sym = sym.replace("\\_", "").replace("\\", "").replace("_", "")
+        # Remove ALL whitespaces from symbols (I D -> ID)
+        sym = re.sub(r"\s+", "", sym)
+        
         # Common LlamaParse/OCR corrections
         sym = re.sub(r"^1$", "ID", sym) 
         sym = re.sub(r"^D$", "ID", sym) # 'D' often partial 'ID' in tables
-        sym = re.sub(r"\b1D\b", "ID", sym)
-        sym = re.sub(r"\bI\s+D\b", "ID", sym)
-        sym = re.sub(r"\bV\s+GS\b", "VGS", sym)
-        sym = re.sub(r"\bV\s+DS\b", "VDS", sym)
-        sym = re.sub(r"\bR\s+DS\b", "RDS", sym)
+        sym = re.sub(r"^1D$", "ID", sym)
+        sym = re.sub(r"^VGS$", "VGS", sym) # Just making sure
+        sym = re.sub(r"^VDS$", "VDS", sym)
+        sym = re.sub(r"^RDS$", "RDS", sym)
+        
         # Remove any leading/trailing math artifacts or subscripts symbols
         sym = re.sub(r"^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$", "", sym)
-        return sym
+        return sym or "-"
 
     def clean_engineering_text(text: str) -> str:
         if not text or text == "-": return "-"
+        
+        # Aggressive De-LaTeX and basic cleanup BEFORE logic
+        text = text.replace("\\_", "_").replace("\\", "").replace("Condition:", "")
+        
         # Standardize temperature and conditions
         text = re.sub(r"T\s*[AJ]\b", lambda m: "T" + m.group(0)[-1].upper(), text, flags=re.IGNORECASE)
         text = re.sub(r"T\s*[AJ]\s*=", lambda m: "T" + m.group(0)[-1].upper() + "=", text, flags=re.IGNORECASE)
         text = re.sub(r"\bGS\s*j\b", "GS", text, flags=re.IGNORECASE)
         text = re.sub(r"\bGS\b", "", text, flags=re.IGNORECASE).strip()
         text = re.sub(r"\bj\b", "", text, flags=re.IGNORECASE).strip()
-        # Handle 'T A-25' -> 'TA=25'
-        text = re.sub(r"T\s*A\s*-", "TA=", text, flags=re.IGNORECASE)
-        text = re.sub(r"T\s*-", "T=", text, flags=re.IGNORECASE)
+        # Handle 'T A-25' -> 'TA=25', 'T \- A' -> 'TA', 'T -70' -> 'T=70'
+        text = re.sub(r"T\s*[A]?\s*-\s*([0-9])", r"TA=\1", text, flags=re.IGNORECASE)
+        text = re.sub(r"T\s*-\s*([0-9])", r"T=\1", text, flags=re.IGNORECASE)
+        text = re.sub(r"T\s*A?\s*-\s*", "TA=", text, flags=re.IGNORECASE)
         text = re.sub(r"\bV\s*=\s*", "V=", text, flags=re.IGNORECASE)
         text = re.sub(r"\s+", " ", text).strip()
         return text or "-"
