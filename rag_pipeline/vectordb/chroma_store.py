@@ -114,60 +114,74 @@ class ChromaStore(VectorStore):
     # -------------------------------------------------
     # QUERY  (satisfies abstract method)
     # -------------------------------------------------
-    def query(
+    def _get_all_collections(self):
+        cols = self._client.list_collections()
+        return [self._client.get_collection(c.name if hasattr(c, "name") else c) for c in cols]
+
+    def search(
         self,
         query_embedding: List[float],
         n_results: int = 5,
         filters: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
-        """Nearest-neighbour search. Returns list of result dicts."""
-        # ChromaDB raises an error if n_results > collection size.
-        # CRITICAL: if metadata tags (where={...}) are used, n_results MUST 
-        # not exceed the number of documents that match the filter. Otherwise,
-        # hnswlib crashes with 'RuntimeError: Cannot return results as 2D array'.
-        total = self._collection.count()
-        if total == 0:
-            return []
-
-        effective_n = n_results
-        if filters:
-            try:
-                # Get the IDs of all documents matching the metadata filter
-                res = self._collection.get(where=filters, include=[])
-                filtered_count = len(res.get("ids", []))
-                effective_n = min(n_results, filtered_count)
-            except Exception as exc:
-                logger.warning("ChromaStore: filtered count failed (%s)", exc)
-                effective_n = min(n_results, total)
+        """Multi-Collection Nearest-neighbour search. Spans all component collections."""
+        collections_to_search = []
+        
+        # Determine target collections based on filter
+        comp_target = None
+        if filters and "component" in filters:
+            inner = filters["component"]
+            if isinstance(inner, dict) and "$eq" in inner:
+                comp_target = inner["$eq"]
+            elif isinstance(inner, str):
+                comp_target = inner
+                
+        if comp_target:
+            try: collections_to_search.append(self._client.get_collection(comp_target))
+            except: pass
         else:
+            collections_to_search = self._get_all_collections()
+            
+        local_filters = {k: v for k, v in filters.items() if k != "component"} if filters else None
+        if not local_filters: local_filters = None
+            
+        all_results = []
+        for col in collections_to_search:
+            total = col.count()
+            if total == 0: continue
+            
             effective_n = min(n_results, total)
-
-        if effective_n <= 0:
-            logger.debug("ChromaStore: zero results match filters — skipping query")
-            return []
-
-        results = self._collection.query(
-            query_embeddings=[query_embedding],
-            n_results=effective_n,
-            where=filters,
-        )
-
-        # Flatten ChromaDB's batched response into a clean list
-        output = []
-        ids = results.get("ids", [[]])[0]
-        docs = results.get("documents", [[]])[0]
-        metas = results.get("metadatas", [[]])[0]
-        distances = results.get("distances", [[]])[0]
-
-        for doc_id, text, meta, dist in zip(ids, docs, metas, distances):
-            output.append({
-                "id": doc_id,
-                "text": text,
-                "metadata": meta,
-                "score": 1.0 - dist,  # convert distance → similarity
-            })
-
-        return output
+            if local_filters:
+                try:
+                    res = col.get(where=local_filters, include=[])
+                    effective_n = min(n_results, len(res.get("ids", [])))
+                except: pass
+            if effective_n <= 0: continue
+            
+            try:
+                res = col.query(
+                    query_embeddings=[query_embedding],
+                    n_results=effective_n,
+                    where=local_filters
+                )
+                
+                ids = res.get("ids", [[]])[0]
+                docs = res.get("documents", [[]])[0]
+                metas = res.get("metadatas", [[]])[0]
+                dists = res.get("distances", [[]])[0]
+                
+                for iid, txt, mta, dst in zip(ids, docs, metas, dists):
+                    if "component" not in mta: mta["component"] = col.name
+                    all_results.append({
+                        "id": iid,
+                        "text": txt,
+                        "metadata": mta,
+                        "score": 1.0 - (dst or 0.0)
+                    })
+            except: pass
+            
+        all_results.sort(key=lambda x: x.get("score", 0), reverse=True)
+        return all_results[:n_results]
 
     # -------------------------------------------------
     # DELETE
@@ -176,59 +190,43 @@ class ChromaStore(VectorStore):
         self._collection.delete(ids=list(ids))
 
     def delete_component(self, part_number: str) -> int:
-        """Delete all chunks for a specific part number. Returns count of deleted docs."""
-        # Use get to find all IDs for this part_number first
-        res = self._collection.get(where={"part_number": part_number}, include=[])
-        ids = res.get("ids", [])
-        if ids:
-            self._collection.delete(ids=ids)
-            logger.info("Deleted %d chunks for component '%s'", len(ids), part_number)
-        return len(ids)
+        """Delete entire collection directly."""
+        try:
+            col = self._client.get_collection(part_number)
+            count = col.count()
+            self._client.delete_collection(part_number)
+            return count
+        except: return 0
 
     # -------------------------------------------------
     # COUNT
     # -------------------------------------------------
     def count(self) -> int:
-        return self._collection.count()
+        return sum(col.count() for col in self._get_all_collections())
 
     # -------------------------------------------------
     # LIBRARY — unique components in the collection
     # -------------------------------------------------
     def get_library(self) -> List[Dict[str, Any]]:
-        """Return one entry per unique component (part_number) with stats.
-
-        Each entry:
-            {
-              "component_id": str,
-              "chunk_count":  int,
-              "chunk_types":  list[str],   # distinct chunk_type values
-            }
-        """
-        total = self.count()
-        if total == 0:
-            return []
-
-        # Fetch all metadata in batches (ChromaDB has no GROUP BY)
-        result = self._collection.get(include=["metadatas"])
-        metadatas = result.get("metadatas") or []
-
-        by_component: Dict[str, Dict[str, Any]] = {}
-        for meta in metadatas:
-            part = meta.get("part_number") or meta.get("componentId") or "unknown"
-            if part not in by_component:
-                by_component[part] = {"chunk_count": 0, "chunk_types": set()}
-            by_component[part]["chunk_count"] += 1
-            chunk_type = meta.get("chunkType") or meta.get("chunk_type") or "text"
-            by_component[part]["chunk_types"].add(chunk_type)
-
-        return [
-            {
-                "component_id": k,
-                "chunk_count":  v["chunk_count"],
-                "chunk_types":  sorted(v["chunk_types"]),
-            }
-            for k, v in sorted(by_component.items())
-        ]
+        collections = self._get_all_collections()
+        library = []
+        for col in collections:
+            count = col.count()
+            if count == 0: continue
+            
+            types = set()
+            try:
+                res = col.get(limit=count, include=["metadatas"])
+                for m in (res.get("metadatas", []) or []):
+                    types.add(m.get("type", m.get("chunk_type", "text")))
+            except: pass
+            
+            library.append({
+                "component_id": col.name,
+                "chunk_count": count,
+                "chunk_types": sorted(types)
+            })
+        return sorted(library, key=lambda x: x["component_id"])
 
     # -------------------------------------------------
     # RAW COLLECTION ACCESS (Optional helper)

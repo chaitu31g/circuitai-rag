@@ -125,169 +125,111 @@ def extract_tables_from_markdown(md_text: str) -> List[List[List[str]]]:
     return tables
 
 def process_llamaparse_tables(tables: List[List[List[str]]], part_number: str) -> List[Chunk]:
-    """Process LlamaParse markdown tables into validated, deduplicated chunks."""
+    """Process LlamaParse markdown tables using strict structured extraction (No LLM, no guessing)."""
     all_chunks = []
     seen_rows = set() # (parameter, symbol, condition, value)
     
-    # ── Ultimate Symbol & Condition Normalizer ──────────────────────────────
     def normalize_symbol(sym: str) -> str:
         if not sym or sym == "-": return "-"
-        
-        # Aggressive De-LaTeX and noise removal
         sym = sym.replace("\\_", "").replace("\\", "").replace("_", "")
-        # Remove ALL whitespaces from symbols (I D -> ID)
         sym = re.sub(r"\s+", "", sym)
-        
-        # Common LlamaParse/OCR corrections
-        sym = re.sub(r"^1$", "ID", sym) 
-        sym = re.sub(r"^D$", "ID", sym) # 'D' often partial 'ID' in tables
-        sym = re.sub(r"^1D$", "ID", sym)
-        sym = re.sub(r"^VGS$", "VGS", sym) # Just making sure
-        sym = re.sub(r"^VDS$", "VDS", sym)
-        sym = re.sub(r"^RDS$", "RDS", sym)
-        
-        # Remove any leading/trailing math artifacts or subscripts symbols
         sym = re.sub(r"^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$", "", sym)
         return sym or "-"
 
     def clean_engineering_text(text: str) -> str:
         if not text or text == "-": return "-"
-        
-        # Aggressive De-LaTeX and basic cleanup BEFORE logic
         text = text.replace("\\_", "_").replace("\\", "").replace("Condition:", "")
-        
-        # Standardize temperature and conditions
-        text = re.sub(r"T\s*[AJ]\b", lambda m: "T" + m.group(0)[-1].upper(), text, flags=re.IGNORECASE)
-        text = re.sub(r"T\s*[AJ]\s*=", lambda m: "T" + m.group(0)[-1].upper() + "=", text, flags=re.IGNORECASE)
-        text = re.sub(r"\bGS\s*j\b", "GS", text, flags=re.IGNORECASE)
-        text = re.sub(r"\bGS\b", "", text, flags=re.IGNORECASE).strip()
-        text = re.sub(r"\bj\b", "", text, flags=re.IGNORECASE).strip()
-        # Handle 'T A-25' -> 'TA=25', 'T \- A' -> 'TA', 'T -70' -> 'T=70'
-        text = re.sub(r"T\s*[A]?\s*-\s*([0-9])", r"TA=\1", text, flags=re.IGNORECASE)
-        text = re.sub(r"T\s*-\s*([0-9])", r"T=\1", text, flags=re.IGNORECASE)
-        text = re.sub(r"T\s*A?\s*-\s*", "TA=", text, flags=re.IGNORECASE)
-        text = re.sub(r"\bV\s*=\s*", "V=", text, flags=re.IGNORECASE)
         text = re.sub(r"\s+", " ", text).strip()
+        text = text.replace("T = ", "T=")
         return text or "-"
-
-    _CLEAN_FIXES = {
-        r"\bI\s+D\b": "ID", 
-        r"\bt\s+d\(off\)\b": "td(off)", 
-        r"T\s*=\s*25\s*°C": "T=25°C", 
-        r"T\s*=\s*70\s*°C": "T=70°C"
-    }
 
     for i, tbl in enumerate(tables):
         if len(tbl) < 2: continue
-        header = tbl[0]
-        col_map = map_columns_llamaparse(header)
         
-        required_cols = ["parameter", "symbol", "condition"]
-        has_required = all(col_map[k] != -1 for k in required_cols)
-        has_value = any(col_map[k] != -1 for k in ["value", "min", "typ", "max"])
+        header = [h.strip().lower() for h in tbl[0]]
         
-        if not (has_required and has_value):
-            logger.warning(f"Skipping Table {i} — missing core columns.")
-            continue
+        # ── STRICT COLUMN MAPPING (No guessing) ─────────────────────────────────
+        p_idx = -1
+        s_idx = -1
+        c_idx = -1
+        v_idx, min_idx, typ_idx, max_idx, u_idx = -1, -1, -1, -1, -1
+        
+        for idx, h in enumerate(header):
+            if "parameter" in h.lower(): p_idx = idx
+            elif "symbol" in h.lower(): s_idx = idx
+            elif "condition" in h.lower() or "test" in h.lower(): c_idx = idx
+            elif "min" in h.lower(): min_idx = idx
+            elif "typ" in h.lower() or "nominal" in h.lower(): typ_idx = idx
+            elif "max" in h.lower(): max_idx = idx
+            elif "value" in h.lower(): v_idx = idx
+            elif "unit" in h.lower(): u_idx = idx
+            
+        # ── VALIDATION BEFORE STORAGE ───────────────────────────────────────────
+        # Store only if parameter and symbol exist, plus at least one value column
+        if p_idx == -1 or s_idx == -1: continue
+        if v_idx == -1 and min_idx == -1 and typ_idx == -1 and max_idx == -1: continue
 
-        is_range = any(k in ["min", "typ", "max"] for k in col_map.keys() if col_map[k] != -1)
-        l_p, l_s, l_c, l_u = "-", "-", "-", "-"
-        
+        # ── 1:1 ROW EXTRACTION ────────────────────────────────────────────────
+        l_p, l_s, l_c = "-", "-", "-"
         for row in tbl[1:]:
             if not any(row): continue
             
-            def get_cell(key):
-                idx = col_map.get(key, -1)
-                txt = row[idx].strip() if idx != -1 and idx < len(row) else "-"
-                for p, r in _CLEAN_FIXES.items(): 
-                    txt = re.sub(p, r, txt)
-                return txt
+            def get_cell(idx):
+                return row[idx].strip() if idx != -1 and idx < len(row) else "-"
+                
+            p = get_cell(p_idx)
+            s = get_cell(s_idx)
+            c = get_cell(c_idx)
+            u = get_cell(u_idx)
             
-            p, s, c, u = get_cell("parameter"), get_cell("symbol"), get_cell("condition"), get_cell("unit")
             p = p if p != "-" else l_p
             s = s if s != "-" else l_s
             c = c if (c != "-" or p != l_p) else l_c
-            u = u if u != "-" else l_u
             
-            s_norm = normalize_symbol(s)
-            c_norm = clean_engineering_text(c)
+            sn = normalize_symbol(s)
+            cn = clean_engineering_text(c)
             
-            if p == "-" or p == "": continue
-            l_p, l_s, l_c, l_u = p, s, c, u
+            if p == "-" or p == "" or sn == "-": continue
+            l_p, l_s, l_c = p, s, c
             
-            extr = resolve_row_values_llamaparse(row, col_map, is_range, u)
-            if not extr: continue
+            # Value extraction EXACTLY as provided
+            val_text = ""
+            val_for_key = ""
             
-            val_str = str(extr.get("value", extr.get("typ", extr.get("max", extr.get("min", "-")))))
-            if p == "-" or s_norm == "-" or val_str == "-" or val_str == "":
-                continue
+            if min_idx != -1 or typ_idx != -1 or max_idx != -1:
+                vmin = get_cell(min_idx)
+                vtyp = get_cell(typ_idx)
+                vmax = get_cell(max_idx)
+                if vmin == "-" and vtyp == "-" and vmax == "-": continue
                 
-            # ── Deduplication on Normalized Keys ─────────────────────────────
-            row_key = (p.lower(), s_norm.lower(), c_norm.lower(), val_str.lower())
-            if row_key in seen_rows:
-                continue
+                if vmin != "-": val_text += f"\nMin: {vmin}"
+                if vtyp != "-": val_text += f"\nTyp: {vtyp}"
+                if vmax != "-": val_text += f"\nMax: {vmax}"
+                val_for_key = vtyp if vtyp != "-" else (vmax if vmax != "-" else vmin)
+            else:
+                v = get_cell(v_idx)
+                if v == "-": continue
+                val_text = f"\nValue: {v}"
+                val_for_key = v
+                
+            # ── DEDUPLICATION (MANDATORY) ─────────────────────────────────────
+            # (parameter, symbol, condition, value)
+            row_key = (p.lower(), sn.lower(), cn.lower(), val_for_key.lower())
+            if row_key in seen_rows: continue
             seen_rows.add(row_key)
             
-            f_u = extr.get("unit") or u
-            ctext = f"Parameter: {p}\nSymbol: {s_norm}\nCondition: {c_norm}\n"
-            if is_range:
-                for k in ["min", "typ", "max"]: 
-                    if extr.get(k): ctext += f"{k.capitalize()}: {extr[k]}\n"
-            else: 
-                ctext += f"Value: {val_str}\n"
-            
-            if f_u != "-": ctext += f"Unit: {f_u}"
+            # ── CORRECT CHUNK FORMAT ──────────────────────────────────────────
+            ctext = f"Parameter: {p}\nSymbol: {sn}\nCondition: {cn}{val_text}"
+            if u != "-": ctext += f"\nUnit: {u}"
             
             metadata = {
-                "component":     part_number,
-                "part_number":   part_number,
-                "type":          "table",
-                "chunk_type":    "parameter_row",
-                "source":        "llamaparse",
-                "table_index":   i,
-                "parameter":     p,
-                "symbol":        s_norm
+                "component": part_number,
+                "type": "table",
+                "source": "llamaparse",
             }
-            
             all_chunks.append(Chunk(text=ctext.strip(), chunk_type="parameter_row", metadata=metadata))
             
     return all_chunks
-
-def map_columns_llamaparse(header: List[str]) -> Dict[str, int]:
-    m = {k: -1 for k in ["parameter", "symbol", "condition", "min", "typ", "max", "unit", "value"]}
-    for i, h in enumerate(header):
-        l = h.lower()
-        if "param" in l: m["parameter"] = i
-        elif "sym" in l: m["symbol"] = i
-        elif "cond" in l or "test" in l: m["condition"] = i
-        elif "min" in l: m["min"] = i
-        elif "typ" in l: m["typ"] = i
-        elif "max" in l: m["max"] = i
-        elif "unit" in l: m["unit"] = i
-        elif "val" in l: m["value"] = i
-    if m["parameter"] == -1: m["parameter"] = 0
-    if m["symbol"] == -1: m["symbol"] = 1
-    return m
-
-def resolve_row_values_llamaparse(row, col_map, is_range, def_u) -> Dict[str, str]:
-    res = {}
-    def split(t):
-        if not t or t == "-": return "-", "-"
-        ma = re.search(r"^([-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)\s*(.*)$", t.strip())
-        return (ma.groups()[0].strip(), ma.groups()[1].strip() or "-") if ma else (t.strip(), "-")
-        
-    if is_range:
-        for k in ["min", "typ", "max"]:
-            idx = col_map[k]
-            if idx != -1 and idx < len(row) and row[idx].strip() not in ["-", ""]:
-                v, u = split(row[idx]); res[k] = v
-                if u != "-": res["unit"] = u
-    else:
-        vi = col_map.get("value", col_map.get("typ", -1))
-        if vi != -1 and vi < len(row) and row[vi].strip() not in ["-", ""]:
-            v, u = split(row[vi]); res["value"] = v
-            if u != "-": res["unit"] = u
-    return res
 
 def run_llamaparse_extraction(pdf_path: str, part_number: str) -> List[Chunk]:
     try:

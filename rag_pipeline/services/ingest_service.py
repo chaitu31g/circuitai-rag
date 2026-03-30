@@ -216,7 +216,7 @@ def ingest_pdf_pipeline(pdf_path: str, job_id: str) -> None:
 
         # ── STAGE 4: STORING ──────────────────────────────────────────────
         update_job(job_id, current_stage=PipelineStage.STORING)
-        # Stage 4: STORAGE — CONSOLIDATED GLOBAL STORE
+        # Stage 4: STORAGE — SINGLE COLLECTION PER PDF
         _log(job_id, "")
         _log(job_id, "┌─ Stage 4/4 · ChromaDB Storage")
 
@@ -224,27 +224,26 @@ def ingest_pdf_pipeline(pdf_path: str, job_id: str) -> None:
         for chunk in embedded:
             chunk["metadata"] = _flatten_metadata(chunk.get("metadata", {}))
 
+        # ── PREVENT MULTIPLE INSERTS ──────────────────────────────────────────
+        # Check if collection already exists. If yes -> Delete all to recreate cleanly.
         store = ChromaStore(
             persist_dir=Path(config.chroma_persist_dir),
-            collection_name=config.chroma_collection, # Consolidate into global 'datasheets'
+            collection_name=part_number, # STRICT RULE: pdf_name only!
             expected_dim=dim or 1024,
         )
+        
+        # Wipe the entire collection to prevent duplicate inserts
+        try:
+            store.collection.delete(where={})
+        except Exception:
+            pass
 
-        # ── AUTO-CLEANUP ──────────────────────────────────────────────────────
-        # Delete ANY existing data for this component ID (or PDF name) to prevent 
-        # database growth and 'stale' duplicates across re-runs.
-        _log(job_id, f"│  Cleaning existing data for '{part_number}'…")
-        store.delete_component(part_number)
-        
-        # Also clean by 'component' tag to be safe with older schema
-        store.collection.delete(where={"component": part_number})
-        
         before = store.count()
         store.upsert_chunks(embedded)
         store.persist()
         after = store.count()
 
-        _log(job_id, f"│  Global Collection : '{config.chroma_collection}'")
+        _log(job_id, f"│  Collection        : '{part_number}'")
         _log(job_id, f"│  Collection size   : {after} chunks")
         _log(job_id, f"│  Upserted          : {len(embedded)} chunks")
 
