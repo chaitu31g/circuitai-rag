@@ -122,11 +122,12 @@ class EmbeddingPipeline:
             # Flatten so part_number etc. live at the top level of stored metadata
             inner_meta = chunk.get("metadata", {})
             component_id = (
-                inner_meta.get("part_number")
+                inner_meta.get("component")
+                or inner_meta.get("part_number")
                 or chunk.get("componentId")
             )
             if not component_id:
-                raise ValueError(f"Chunk metadata is missing 'part_number' or 'componentId': {chunk['text'][:100]}")
+                raise ValueError(f"Chunk metadata is missing 'component', 'part_number' or 'componentId': {chunk['text'][:100]}")
 
             metadata: Dict[str, Any] = {
                 "chunk_type": chunk.get("chunk_type") or chunk.get("chunkType", "text"),
