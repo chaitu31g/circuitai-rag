@@ -220,36 +220,62 @@ def ingest_pdf_pipeline(pdf_path: str, job_id: str) -> None:
 
         # ── STAGE 4: STORING ──────────────────────────────────────────────
         update_job(job_id, current_stage=PipelineStage.STORING)
-        # Stage 4: STORAGE — SINGLE COLLECTION PER PDF
         _log(job_id, "")
         _log(job_id, "┌─ Stage 4/4 · ChromaDB Storage")
 
-        # Flatten metadata before storing to avoid ChromaDB metadata type errors
+        # ── 4. REMOVE "unknown" FALLBACK & 5. DEDUPLICATION ID ────────────
+        import hashlib
+        final_embedded = []
+        seen_ids = set()
+        
         for chunk in embedded:
-            chunk["metadata"] = _flatten_metadata(chunk.get("metadata", {}))
+            meta = chunk.get("metadata", {})
+            if not meta.get("component"):
+                raise ValueError("Metadata missing 'component'. Abandoning ingestion to prevent 'unknown' fallback collections.")
+            
+            # Generate deterministic chunk ID precisely as requested
+            chunk_type = meta.get("chunk_type") or meta.get("type", "")
+            if chunk_type == "parameter_row" or chunk_type == "table":
+                p = str(meta.get("parameter", ""))
+                c = str(meta.get("condition", ""))
+                v = str(chunk.get("text", "")) 
+                chunk_id = hashlib.sha256(f"{p}_{c}_{v}".encode("utf-8")).hexdigest()[:16]
+            else:
+                chunk_id = hashlib.sha256(chunk["text"].encode("utf-8")).hexdigest()[:16]
+            
+            if chunk_id in seen_ids:
+                continue # 5. Skip if already exists physically
+            
+            seen_ids.add(chunk_id)
+            chunk["id"] = chunk_id
+            chunk["metadata"] = _flatten_metadata(meta)
+            final_embedded.append(chunk)
 
-        # ── PREVENT MULTIPLE INSERTS ──────────────────────────────────────────
-        # Check if collection already exists. If yes -> Delete all to recreate cleanly.
+        # ── 2. FIX COLLECTION NAME & 3. USE get_or_create_collection ────────
         store = ChromaStore(
             persist_dir=Path(config.chroma_persist_dir),
-            collection_name=part_number, # STRICT RULE: pdf_name only!
+            collection_name=part_number, 
             expected_dim=dim or 1024,
         )
         
-        # Wipe the entire collection to prevent duplicate inserts
-        try:
-            store.collection.delete(where={})
-        except Exception:
-            pass
+        # ── 6. CLEAR COLLECTION BEFORE INSERT ─────────────────────────────────
+        try: store.collection.delete(where={})
+        except Exception: pass
 
         before = store.count()
-        store.upsert_chunks(embedded)
-        store.persist()
+        if final_embedded:
+            store.upsert_chunks(final_embedded)
+            store.persist()
+            
         after = store.count()
+        
+        # ── 7. VALIDATE STORAGE ───────────────────────────────────────────────
+        if after == 0:
+            raise RuntimeError(f"Storage validation failed: Collection '{part_number}' is corrupt/empty after ingestion.")
 
         _log(job_id, f"│  Collection        : '{part_number}'")
         _log(job_id, f"│  Collection size   : {after} chunks")
-        _log(job_id, f"│  Upserted          : {len(embedded)} chunks")
+        _log(job_id, f"│  Upserted          : {len(final_embedded)} chunks")
 
         update_job(job_id, stage_completed=PipelineStage.STORING)
         _log(job_id, "└─ Storing complete ✔")
