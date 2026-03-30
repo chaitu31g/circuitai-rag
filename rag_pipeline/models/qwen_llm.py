@@ -9,7 +9,7 @@ the codebase, and exposes a simple generate_response() function that the
 backend chat endpoints can call directly.
 
 Model   : Qwen/Qwen2.5-3B-Instruct  (instruction-tuned, supports chat template)
-Quant   : 4-bit NF4 via bitsandbytes  — fits comfortably on a T4 (16 GB)
+Quant   : None (Full weights / float16) — production-safe load
 Device  : device_map="auto"  (GPU if available, CPU fallback)
 
 The model can also be overridden by the HF_MODEL environment variable so
@@ -204,7 +204,7 @@ _REASONING_PATTERNS = (
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _load_model(model_id: str = MODEL_NAME) -> None:
-    """Load tokenizer + 4-bit quantised Qwen into module globals (once)."""
+    """Load tokenizer + Qwen into module globals (once) without quantization."""
     global _tokenizer, _model
 
     with _load_lock:
@@ -213,21 +213,14 @@ def _load_model(model_id: str = MODEL_NAME) -> None:
 
         try:
             import torch
-            from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+            from transformers import AutoModelForCausalLM, AutoTokenizer
         except ImportError as exc:
             raise RuntimeError(
                 "Required packages missing. Install with:\n"
-                "  pip install transformers accelerate bitsandbytes sentencepiece safetensors"
+                "  pip install transformers accelerate sentencepiece safetensors"
             ) from exc
 
         logger.info("Loading Qwen: %s …", model_id)
-
-        bnb_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.float16,
-        )
 
         _tokenizer = AutoTokenizer.from_pretrained(model_id)
 
@@ -235,14 +228,17 @@ def _load_model(model_id: str = MODEL_NAME) -> None:
         if _tokenizer.pad_token is None:
             _tokenizer.pad_token = _tokenizer.eos_token
 
+        # Production-safe loading: float16 on GPU, float32 on CPU
+        torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+
         _model = AutoModelForCausalLM.from_pretrained(
             model_id,
-            quantization_config=bnb_config,
             device_map="auto",
-            torch_dtype="auto",
+            torch_dtype=torch_dtype,
         )
         _model.eval()
-        logger.info("Qwen loaded ✓  (model=%s, device_map=auto)", model_id)
+        logger.info("Qwen loaded successfully without quantization ✓ (model=%s, dtype=%s, device_map=auto)", model_id, torch_dtype)
+        print("Model loaded successfully without quantization")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -46,7 +46,6 @@ echo "━━━ Step 4: Install remaining sub-deps that need their own deps ━�
 pip install -q \
     sentence-transformers \
     accelerate \
-    bitsandbytes \
     safetensors \
     sentencepiece \
     timm \
