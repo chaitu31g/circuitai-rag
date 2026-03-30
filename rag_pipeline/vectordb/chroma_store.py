@@ -118,7 +118,7 @@ class ChromaStore(VectorStore):
         cols = self._client.list_collections()
         return [self._client.get_collection(c.name if hasattr(c, "name") else c) for c in cols]
 
-    def search(
+    def query(
         self,
         query_embedding: List[float],
         n_results: int = 5,

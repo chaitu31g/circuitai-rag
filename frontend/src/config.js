@@ -1,2 +1,2 @@
 export const API_BASE_URL =
-  "https://ict-machine-contribute-migration.trycloudflare.com";
+  "https://fundamental-mice-fruits-hunter.trycloudflare.com";

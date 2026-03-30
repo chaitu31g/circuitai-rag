@@ -618,10 +618,15 @@ def get_figures(component: str | None = None):
 def get_library():
     """Return all unique components stored in ChromaDB with chunk stats + file metadata."""
     try:
-        store = ChromaStore(
-            persist_dir=Path(config.chroma_persist_dir),
-            collection_name=config.chroma_collection,
-        )
+        try:
+            store = ChromaStore(
+                persist_dir=Path(config.chroma_persist_dir),
+                collection_name=config.chroma_collection,
+            )
+            logger.info("✅ ChromaStore initialized successfully")
+        except Exception as e:
+            raise RuntimeError(f"Vector store initialization failed: {e}")
+            
         components = store.get_library()
 
         knowledge_dir = Path(config.knowledge_dir)
