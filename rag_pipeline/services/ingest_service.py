@@ -225,8 +225,8 @@ def ingest_pdf_pipeline(pdf_path: str, job_id: str) -> None:
 
         store = ChromaStore(
             persist_dir=Path(config.chroma_persist_dir),
-            collection_name=clean_stem,
-            expected_dim=dim or 1024,   # triggers auto-rebuild if old 384-dim collection exists
+            collection_name=config.chroma_collection, # Global collection
+            expected_dim=dim or 1024,
         )
         before = store.count()
         store.upsert_chunks(embedded)

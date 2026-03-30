@@ -57,9 +57,18 @@ def get_api_key() -> str:
             
     return ""
 
-# ─────────────────────────────────────────────────────────────────
-# [Rest of the extraction logic - same as before]
-# ─────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────
+# ── LlamaParse Instruction ──────────────────────────────────────────────────
+_STRICT_SEMICONDUCTOR_INSTRUCTION = (
+    "Extract all semiconductor characteristic and rating tables strictly.\n"
+    "Schema Rules:\n"
+    "1. Tables MUST have columns: Parameter | Symbol | Conditions | Value | Unit.\n"
+    "2. If the source uses Min/Typ/Max, use: Parameter | Symbol | Conditions | Min | Typ | Max | Unit.\n"
+    "3. Repeat the 'Parameter' and 'Symbol' name for every row that belongs to them (un-merge cells).\n"
+    "4. Preserve exact numeric values and units (e.g., 25 °C, V_DS=100V).\n"
+    "5. Do NOT split symbols like ID into I D. Keep them as written.\n"
+    "6. If a value is missing, use '-'.\n"
+)
 
 async def parse_pdf_with_llamaparse(pdf_path: str) -> str:
     api_key = get_api_key()
@@ -74,11 +83,13 @@ async def parse_pdf_with_llamaparse(pdf_path: str) -> str:
 
     print(f"🚀 LlamaParse starting for: {os.path.basename(pdf_path)}")
     
+    # Use system_prompt_append to avoid deprecation warnings and improve quality
     parser = LlamaParse(
         api_key=api_key,
         result_type="markdown",
-        parsing_instruction="Extract all semiconductor characteristic tables. Columns: Parameter, Symbol, Conditions, Value, Unit.",
-        max_timeout=5000
+        system_prompt_append=_STRICT_SEMICONDUCTOR_INSTRUCTION,
+        max_timeout=5000,
+        use_vendor_multimodal_model=True, # Best for table structure
     )
     
     documents = await parser.aload_data(pdf_path)
@@ -93,12 +104,18 @@ def extract_tables_from_markdown(md_text: str) -> List[List[List[str]]]:
     curr_table = []
     in_table = False
     for line in lines:
+        line = line.strip()
         if "|" in line:
-            if "-|-" in line or "|---" in line:
+            # Check for header separator
+            if "-|-" in line or "|---" in line or "| :---" in line:
                 in_table = True
                 continue
-            row = [c.strip() for c in line.split("|")][1:-1]
-            if not row or all(not c for c in row): continue
+            row = [c.strip() for c in line.split("|")]
+            # Filter empty boundary elements from markdown split
+            if line.startswith("|"): row = row[1:]
+            if line.endswith("|"): row = row[:-1]
+            
+            if not any(row): continue
             curr_table.append(row)
             in_table = True
         else:
