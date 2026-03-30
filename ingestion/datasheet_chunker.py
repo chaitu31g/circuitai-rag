@@ -568,14 +568,19 @@ def chunk_document(
     section_priority: dict[str, int] = {}
 
     for t in texts:
-        label = t.get("label", "text")
         txt   = t.get("text", "").strip()
-        if not txt:
+        label = t.get("label", "text").lower()
+        
+        # Skip labels that are explicitly handled by the table pass
+        # to prevent redundancy in the prose/coverage windows.
+        if label in ("table", "table_cell", "figure", "picture"):
+            seen_raws.add(txt)
             continue
 
-        if label in _SKIP_LABELS:
+        if not txt or len(txt) < MIN_CHUNK_LENGTH:
+            seen_raws.add(txt)
             continue
-
+            
         detected = None
         if label in ("section_header", "title"):
             detected = _detect_section(txt)
@@ -589,13 +594,11 @@ def chunk_document(
                 "electrical_characteristics": 9, "absolute_maximum_ratings": 9,
             }.get(detected, 3))
             
-            if len(txt) >= MIN_CHUNK_LENGTH and detected not in _SKIP_TYPES:
-                sections.setdefault(detected, []).insert(0, txt)
+            if detected not in _SKIP_TYPES:
+                sections.setdefault(detected, []).append(txt)
                 seen_raws.add(txt)
             continue
 
-        # Only skip the specific text block if it's in a skip section, 
-        # but don't skip the whole flow.
         if current_section in _SKIP_TYPES:
             seen_raws.add(txt) # mark as 'seen' so it doesn't leak into coverage windows either
             continue

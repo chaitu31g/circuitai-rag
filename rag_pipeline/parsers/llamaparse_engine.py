@@ -114,14 +114,34 @@ def process_llamaparse_tables(tables: List[List[List[str]]], part_number: str) -
     all_chunks = []
     seen_rows = set() # (parameter, symbol, condition, value)
     
-    # ── Noise removal regex ──────────────────────────────────────────────────
-    # Removes engineering noise like "GS", "j" and normalized multiple spaces
+    # ── Ultimate Symbol & Condition Normalizer ──────────────────────────────
+    def normalize_symbol(sym: str) -> str:
+        if not sym or sym == "-": return "-"
+        sym = sym.strip()
+        # Common LlamaParse/OCR corrections
+        sym = re.sub(r"^1$", "ID", sym) 
+        sym = re.sub(r"^D$", "ID", sym) # 'D' often partial 'ID' in tables
+        sym = re.sub(r"\b1D\b", "ID", sym)
+        sym = re.sub(r"\bI\s+D\b", "ID", sym)
+        sym = re.sub(r"\bV\s+GS\b", "VGS", sym)
+        sym = re.sub(r"\bV\s+DS\b", "VDS", sym)
+        sym = re.sub(r"\bR\s+DS\b", "RDS", sym)
+        # Remove any leading/trailing math artifacts or subscripts symbols
+        sym = re.sub(r"^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$", "", sym)
+        return sym
+
     def clean_engineering_text(text: str) -> str:
         if not text or text == "-": return "-"
-        # Remove common noise patterns seen in LlamaParse datasheet output (e.g., "GS j")
-        text = re.sub(r"\bGS\b", "", text, flags=re.IGNORECASE)
-        text = re.sub(r"\bj\b", "", text, flags=re.IGNORECASE)
-        # Normalize spacing
+        # Standardize temperature and conditions
+        text = re.sub(r"T\s*[AJ]\b", lambda m: "T" + m.group(0)[-1].upper(), text, flags=re.IGNORECASE)
+        text = re.sub(r"T\s*[AJ]\s*=", lambda m: "T" + m.group(0)[-1].upper() + "=", text, flags=re.IGNORECASE)
+        text = re.sub(r"\bGS\s*j\b", "GS", text, flags=re.IGNORECASE)
+        text = re.sub(r"\bGS\b", "", text, flags=re.IGNORECASE).strip()
+        text = re.sub(r"\bj\b", "", text, flags=re.IGNORECASE).strip()
+        # Handle 'T A-25' -> 'TA=25'
+        text = re.sub(r"T\s*A\s*-", "TA=", text, flags=re.IGNORECASE)
+        text = re.sub(r"T\s*-", "T=", text, flags=re.IGNORECASE)
+        text = re.sub(r"\bV\s*=\s*", "V=", text, flags=re.IGNORECASE)
         text = re.sub(r"\s+", " ", text).strip()
         return text or "-"
 
@@ -131,22 +151,18 @@ def process_llamaparse_tables(tables: List[List[List[str]]], part_number: str) -
         r"T\s*=\s*25\s*°C": "T=25°C", 
         r"T\s*=\s*70\s*°C": "T=70°C"
     }
-    
+
     for i, tbl in enumerate(tables):
-        if len(tbl) < 2: continue # Needs header + at least 1 row
-        
+        if len(tbl) < 2: continue
         header = tbl[0]
         col_map = map_columns_llamaparse(header)
         
-        # ── Strict Table Structure Enforcement ────────────────────────────────
-        # Must have: Parameter, Symbol, Conditions, and a value column
-        # Skip if any core column is missing.
         required_cols = ["parameter", "symbol", "condition"]
         has_required = all(col_map[k] != -1 for k in required_cols)
         has_value = any(col_map[k] != -1 for k in ["value", "min", "typ", "max"])
         
         if not (has_required and has_value):
-            logger.warning(f"Skipping Table {i} — missing required columns (Parameter, Symbol, Conditions, or Value).")
+            logger.warning(f"Skipping Table {i} — missing core columns.")
             continue
 
         is_range = any(k in ["min", "typ", "max"] for k in col_map.keys() if col_map[k] != -1)
@@ -162,17 +178,14 @@ def process_llamaparse_tables(tables: List[List[List[str]]], part_number: str) -
                     txt = re.sub(p, r, txt)
                 return txt
             
-            # Extract raw values
-            raw_p, raw_s, raw_c, raw_u = get_cell("parameter"), get_cell("symbol"), get_cell("condition"), get_cell("unit")
+            p, s, c, u = get_cell("parameter"), get_cell("symbol"), get_cell("condition"), get_cell("unit")
+            p = p if p != "-" else l_p
+            s = s if s != "-" else l_s
+            c = c if (c != "-" or p != l_p) else l_c
+            u = u if u != "-" else l_u
             
-            # Forward-fill logic
-            p = raw_p if raw_p != "-" else l_p
-            s = raw_s if raw_s != "-" else l_s
-            c = raw_c if (raw_c != "-" or raw_p != l_p) else l_c
-            u = raw_u if raw_u != "-" else l_u
-            
-            # ── Clean Condition Text ──────────────────────────────────────────
-            c = clean_engineering_text(c)
+            s_norm = normalize_symbol(s)
+            c_norm = clean_engineering_text(c)
             
             if p == "-" or p == "": continue
             l_p, l_s, l_c, l_u = p, s, c, u
@@ -180,22 +193,18 @@ def process_llamaparse_tables(tables: List[List[List[str]]], part_number: str) -
             extr = resolve_row_values_llamaparse(row, col_map, is_range, u)
             if not extr: continue
             
-            # Determine primary value for validation and deduplication
             val_str = str(extr.get("value", extr.get("typ", extr.get("max", extr.get("min", "-")))))
-            
-            # ── Validation: Skip rows where core info is missing or empty ──────
-            if p == "-" or s == "-" or val_str == "-" or val_str == "":
+            if p == "-" or s_norm == "-" or val_str == "-" or val_str == "":
                 continue
                 
-            # ── Deduplication ────────────────────────────────────────────────
-            # Use unique key: (parameter, symbol, condition, value)
-            row_key = (p.lower(), s.lower(), c.lower(), val_str.lower())
+            # ── Deduplication on Normalized Keys ─────────────────────────────
+            row_key = (p.lower(), s_norm.lower(), c_norm.lower(), val_str.lower())
             if row_key in seen_rows:
                 continue
             seen_rows.add(row_key)
             
             f_u = extr.get("unit") or u
-            ctext = f"Parameter: {p}\nSymbol: {s}\nCondition: {c}\n"
+            ctext = f"Parameter: {p}\nSymbol: {s_norm}\nCondition: {c_norm}\n"
             if is_range:
                 for k in ["min", "typ", "max"]: 
                     if extr.get(k): ctext += f"{k.capitalize()}: {extr[k]}\n"
@@ -204,8 +213,6 @@ def process_llamaparse_tables(tables: List[List[List[str]]], part_number: str) -
             
             if f_u != "-": ctext += f"Unit: {f_u}"
             
-            # ── Metadata ────────────────────────────────────────────────────
-            # Ensure component is never missing and matches PDF name
             metadata = {
                 "component":     part_number,
                 "part_number":   part_number,
@@ -214,7 +221,7 @@ def process_llamaparse_tables(tables: List[List[List[str]]], part_number: str) -
                 "source":        "llamaparse",
                 "table_index":   i,
                 "parameter":     p,
-                "symbol":        s
+                "symbol":        s_norm
             }
             
             all_chunks.append(Chunk(text=ctext.strip(), chunk_type="parameter_row", metadata=metadata))

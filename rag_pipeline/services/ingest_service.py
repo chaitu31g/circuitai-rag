@@ -103,9 +103,13 @@ def ingest_pdf_pipeline(pdf_path: str, job_id: str) -> None:
 
     # Derive clean original filename from the job's stored file_name
     from backend.models import get_job
-    job_obj      = get_job(job_id)
-    original_name = job_obj.file_name if job_obj else pdf_file.name
-    clean_stem    = Path(original_name).stem.replace(" ", "_").replace("/", "")
+    job = get_job(job_id)
+    
+    # If the job is missing, use the filename stem as the ultimate source of truth
+    # to avoid 'unknown' collections or metadata.
+    original_name = job.file_name if job else pdf_file.name
+    clean_stem    = pdf_file.stem.replace(" ", "_").replace("/", "")
+    part_number   = clean_stem
 
     # Install stdout capture + logging handler so all output goes to job terminal
     stdout_cap  = _StdoutCapture(job_id, sys.stdout)
