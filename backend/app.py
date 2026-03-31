@@ -482,22 +482,12 @@ def format_exact_match_table(query: str, sources: list) -> str:
                 p_val = v
                 break
         param_norm = normalize_param(p_val)
-        print(f"DEBUG: DB PARAM: {repr(param_norm)}", flush=True)
         if param_norm == user_query_norm:
             exact_matches.append(r)
             
-    if not exact_matches:
-        for r in rows:
-            p_val = ""
-            for k, v in r.items():
-                if normalize_col(k) == "Parameter":
-                    p_val = v
-                    break
-            param_norm = normalize_param(p_val)
-            if param_norm and (user_query_norm in param_norm or param_norm in user_query_norm):
-                exact_matches.append(r)
-                
-    print(f"DEBUG: FILTERED: {len(exact_matches)}", flush=True)
+    print(f"DEBUG: QUERY: '{query}'", flush=True)
+    print(f"DEBUG: MATCHED PARAMETERS: {[r for r in exact_matches]}", flush=True)
+    print(f"DEBUG: FILTERED COUNT: {len(exact_matches)}", flush=True)
     
     # ── Phase 1: QUERY TYPE DETECTION ──────────────────────────────────────────
     if len(exact_matches) < 2:
@@ -594,26 +584,29 @@ def chat(req: ChatRequest):
 
         # Deterministic direct-answer path (e.g., graph count queries)
         if is_direct:
-            return {"answer": context_or_answer, "sources": sources}
+            return {"answer": context_or_answer, "sources": sources, "response_type": "text"}
 
         context = context_or_answer
         if not context:
-            answer = "No relevant context found in the knowledge base for this query."
+            answer = "No structured data found. Showing feature description instead.\n"
+            response_type = "text"
         else:
             table_answer = format_exact_match_table(req.query, sources)
             if table_answer:
                 answer = table_answer
+                response_type = "table"
             else:
+                response_type = "text"
                 fallback_sources = [s for s in sources if s.get("type", "") in ["text", "table", "parameter_row", ""]]
                 if fallback_sources:
                     from backend.llm.hf_llm import build_prompt, generate_response
                     text_context = "\n\n".join([s.get("text", "") for s in fallback_sources[:3]])
                     prompt = build_prompt(text_context, req.query)
-                    answer = generate_response(prompt)
+                    answer = "No structured data found. Showing feature description instead.\n\n" + generate_response(prompt)
                 else:
-                    answer = "No exact match found for parameter: " + req.query
+                    answer = "No structured data found."
 
-        return {"answer": answer, "sources": sources}
+        return {"answer": answer, "sources": sources, "response_type": response_type}
     except Exception as e:
         logger.error("Chat error: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
@@ -653,6 +646,7 @@ def chat_stream(req: ChatRequest):
 
             # ── 4a. Deterministic direct answer (e.g., graph count) ───────────────
             if is_direct:
+                yield _sse({"type": "response_type", "response_type": "text"})
                 yield _sse({"type": "token", "token": context_or_answer})
                 yield _sse({"type": "done"})
                 return
@@ -660,24 +654,28 @@ def chat_stream(req: ChatRequest):
             # ── 4b. No context → short-circuit ───────────────────────────────────
             context = context_or_answer
             if not context:
-                yield _sse({"type": "token", "token": "No relevant context found in the knowledge base for this query."})
+                yield _sse({"type": "response_type", "response_type": "text"})
+                yield _sse({"type": "token", "token": "No structured data found. Showing feature description instead.\n"})
                 yield _sse({"type": "done"})
                 return
 
-            # ── 5. Bypass LLM for Exact Extraction ───────────────────────────────
+            # ── 5. Exact Extraction vs Semantic Generation ───────────────────────
             table_answer = format_exact_match_table(req.query, sources)
             if table_answer:
+                yield _sse({"type": "response_type", "response_type": "table"})
                 yield _sse({"type": "token", "token": table_answer})
             else:
+                yield _sse({"type": "response_type", "response_type": "text"})
                 fallback_sources = [s for s in sources if s.get("type", "") in ["text", "table", "parameter_row", ""]]
                 if fallback_sources:
+                    yield _sse({"type": "token", "token": "No structured data found. Showing feature description instead.\n\n"})
                     from backend.llm.hf_llm import build_prompt, stream_response
                     text_context = "\n\n".join([s.get("text", "") for s in fallback_sources[:3]])
                     prompt = build_prompt(text_context, req.query)
                     for token in stream_response(prompt):
                         yield _sse({"type": "token", "token": token})
                 else:
-                    yield _sse({"type": "token", "token": "No data found"})
+                    yield _sse({"type": "token", "token": "No structured data found."})
             yield _keepalive()
 
             yield _sse({"type": "done"})
