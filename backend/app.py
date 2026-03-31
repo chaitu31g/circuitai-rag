@@ -443,6 +443,19 @@ def format_exact_match_table(query: str, sources: list) -> str:
         p = re.sub(r"\s+", " ", p).strip()
         return p
 
+    def normalize_col(k: str) -> str:
+        k_lower = str(k).lower().strip()
+        k_lower = re.sub(r"\s+", " ", k_lower)
+        if k_lower == "parameter": return "Parameter"
+        if k_lower in ["symbol", "symbols"]: return "Symbol"
+        if k_lower in ["condition", "conditions", "test", "test condition"]: return "Condition"
+        if k_lower in ["value", "val"]: return "Value"
+        if k_lower in ["unit", "units"]: return "Unit"
+        if k_lower in ["min", "minimum"]: return "Min"
+        if k_lower in ["typ", "typical", "typic"]: return "Typ"
+        if k_lower in ["max", "maximum"]: return "Max"
+        return str(k).strip().capitalize()
+
     user_query_norm = normalize_param(query)
     print(f"DEBUG: QUERY: '{query}'", flush=True)
     print(f"DEBUG: NORMALIZED: '{user_query_norm}'", flush=True)
@@ -456,14 +469,15 @@ def format_exact_match_table(query: str, sources: list) -> str:
             rows.append(parsed)
             lower_parsed = {str(k).lower(): v for k, v in parsed.items()}
             print(f"DEBUG: PARSED ROW: {lower_parsed}", flush=True)
-        except Exception as e:
+        except Exception:
             print(f"DEBUG: PARSE FAILED for document: {doc_text}", flush=True)
+            pass
 
     exact_matches = []
     for r in rows:
         p_val = ""
         for k, v in r.items():
-            if str(k).lower() == "parameter":
+            if normalize_col(k) == "Parameter":
                 p_val = v
                 break
         param_norm = normalize_param(p_val)
@@ -475,7 +489,7 @@ def format_exact_match_table(query: str, sources: list) -> str:
         for r in rows:
             p_val = ""
             for k, v in r.items():
-                if str(k).lower() == "parameter":
+                if normalize_col(k) == "Parameter":
                     p_val = v
                     break
             param_norm = normalize_param(p_val)
@@ -485,47 +499,54 @@ def format_exact_match_table(query: str, sources: list) -> str:
     print(f"DEBUG: FILTERED: {len(exact_matches)}", flush=True)
     if not exact_matches:
         return ""
-        
-    all_columns = []
+
+    normalized_matches = []
     for m in exact_matches:
-        for k in m.keys():
-            k_lower = k.lower()
-            if k_lower not in ["component", "type", "source", "chunk_type", "id", "score", "part_number", "page", "table_index"]:
-                if k not in all_columns and k_lower not in [c.lower() for c in all_columns]:
-                    all_columns.append(k)
-                    
+        norm_row = {}
+        for k, v in m.items():
+            k_lower = str(k).lower().strip()
+            if k_lower in ["component", "type", "source", "chunk_type", "id", "score", "part_number", "page", "table_index"]:
+                continue
+            
+            n_col = normalize_col(k)
+            norm_row[n_col] = str(v).strip()
+        normalized_matches.append(norm_row)
+
+    all_available = set()
+    for m in normalized_matches:
+        all_available.update(m.keys())
+
+    base_order = ["Parameter", "Symbol", "Condition", "Min", "Typ", "Max", "Value"]
     ordered_cols = []
-    for pref in ["parameter", "symbol", "condition", "min", "typ", "max", "value", "unit"]:
-        for c in all_columns:
-             if c.lower() == pref and c not in ordered_cols:
-                 ordered_cols.append(c)
-    for c in all_columns:
-        if c not in ordered_cols:
+    
+    for c in base_order:
+        if c in all_available:
             ordered_cols.append(c)
             
+    for c in sorted(list(all_available)):
+        if c not in ordered_cols and c != "Unit":
+            ordered_cols.append(c)
+            
+    if "Unit" in all_available:
+        ordered_cols.append("Unit")
+
     def extract_temp(m):
-        for k, v in m.items():
-            if "condition" in str(k).lower() or "test" in str(k).lower():
-                t_match = re.search(r"(-?\d+)\s*(?:°|deg)?C", str(v), re.IGNORECASE)
-                if t_match:
-                    return float(t_match.group(1))
+        c_val = m.get("Condition", "")
+        t_match = re.search(r"(-?\d+)\s*(?:°|deg)?C", c_val, re.IGNORECASE)
+        if t_match:
+            return float(t_match.group(1))
         return 0.0
         
-    exact_matches.sort(key=extract_temp)
+    normalized_matches.sort(key=extract_temp)
     
-    header_row = "| " + " | ".join([c.capitalize() for c in ordered_cols]) + " |"
+    header_row = "| " + " | ".join(ordered_cols) + " |"
     sep_row = "| " + " | ".join(["---"] * len(ordered_cols)) + " |"
     
     res_rows = []
-    for m in exact_matches:
+    for m in normalized_matches:
         row_vals = []
         for c in ordered_cols:
-            val = "-"
-            for k, v in m.items():
-                if str(k).lower() == c.lower():
-                    val = v
-                    break
-            row_vals.append(str(val))
+            row_vals.append(m.get(c, "-"))
         res_rows.append("| " + " | ".join(row_vals) + " |")
         
     return "\n".join([header_row, sep_row] + res_rows)
