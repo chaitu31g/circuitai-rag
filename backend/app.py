@@ -498,8 +498,10 @@ def format_exact_match_table(query: str, sources: list) -> str:
                 exact_matches.append(r)
                 
     print(f"DEBUG: FILTERED: {len(exact_matches)}", flush=True)
-    if not exact_matches:
-        return ""
+    
+    # ── Phase 1: QUERY TYPE DETECTION ──────────────────────────────────────────
+    if len(exact_matches) < 2:
+        return "" # Single row or no matches -> TEXT QUERY fallback
 
     normalized_matches = []
     for m in exact_matches:
@@ -519,21 +521,41 @@ def format_exact_match_table(query: str, sources: list) -> str:
     for m in normalized_matches:
         all_available.update(m.keys())
 
+    # ── Phase 5: VALIDATION & COLUMN CONTROL ───────────────────────────────────
+    valid_cols = set()
+    for c in all_available:
+        if c.lower() == "parameter" or c.lower() == "component": 
+            valid_cols.add(c)
+            continue
+            
+        has_data = False
+        for m in normalized_matches:
+            val = m.get(c, "")
+            if val and str(val).lower().strip() not in ["", "-", "na", "n/a", "none"]:
+                has_data = True
+                break
+        if has_data:
+            valid_cols.add(c)
+
+    if "Parameter" not in valid_cols or not any(x in valid_cols for x in ["Value", "Min", "Typ", "Max"]):
+        return "" # lacks standard quantitative framework -> text query
+
     base_order = ["Parameter", "Symbol", "Condition", "Min", "Typ", "Max", "Value"]
     ordered_cols = []
     
     for c in base_order:
-        if c in all_available:
+        if c in valid_cols:
             ordered_cols.append(c)
             
-    for c in sorted(list(all_available)):
-        if c not in ordered_cols and c != "Unit":
+    for c in sorted(list(valid_cols)):
+        if c not in ordered_cols and c not in ["Unit", "Component"]:
             ordered_cols.append(c)
             
-    if "Unit" in all_available:
+    if "Unit" in valid_cols:
         ordered_cols.append("Unit")
         
-    ordered_cols.append("Component")
+    if "Component" in valid_cols:
+        ordered_cols.append("Component")
 
     def extract_temp(m):
         c_val = m.get("Condition", "")
@@ -582,10 +604,10 @@ def chat(req: ChatRequest):
             if table_answer:
                 answer = table_answer
             else:
-                text_sources = [s for s in sources if s.get("type", "") == "text"]
-                if text_sources:
+                fallback_sources = [s for s in sources if s.get("type", "") in ["text", "table", "parameter_row", ""]]
+                if fallback_sources:
                     from backend.llm.hf_llm import build_prompt, generate_response
-                    text_context = "\n\n".join([s.get("text", "") for s in text_sources[:3]])
+                    text_context = "\n\n".join([s.get("text", "") for s in fallback_sources[:3]])
                     prompt = build_prompt(text_context, req.query)
                     answer = generate_response(prompt)
                 else:
@@ -647,10 +669,10 @@ def chat_stream(req: ChatRequest):
             if table_answer:
                 yield _sse({"type": "token", "token": table_answer})
             else:
-                text_sources = [s for s in sources if s.get("type", "") == "text"]
-                if text_sources:
+                fallback_sources = [s for s in sources if s.get("type", "") in ["text", "table", "parameter_row", ""]]
+                if fallback_sources:
                     from backend.llm.hf_llm import build_prompt, stream_response
-                    text_context = "\n\n".join([s.get("text", "") for s in text_sources[:3]])
+                    text_context = "\n\n".join([s.get("text", "") for s in fallback_sources[:3]])
                     prompt = build_prompt(text_context, req.query)
                     for token in stream_response(prompt):
                         yield _sse({"type": "token", "token": token})
