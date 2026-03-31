@@ -155,7 +155,7 @@ def process_llamaparse_tables(tables: List[List[List[str]]], part_number: str) -
             if "parameter" in h: p_idx = idx
             elif "symbol" in h: s_idx = idx
             
-        if p_idx == -1 or s_idx == -1: continue
+        if p_idx == -1: continue
 
         l_p, l_s, l_c = "-", "-", "-"
         for row in tbl[1:]:
@@ -163,15 +163,15 @@ def process_llamaparse_tables(tables: List[List[List[str]]], part_number: str) -
             if not any(row): continue
             
             p = row[p_idx].strip() if p_idx < len(row) else "-"
-            s = row[s_idx].strip() if s_idx < len(row) else "-"
+            s = row[s_idx].strip() if s_idx != -1 and s_idx < len(row) else "-"
             
             p = p if p != "-" else l_p
             s = s if s != "-" else l_s
             
             p = p.strip()
-            sn = normalize_symbol(s)
+            sn = normalize_symbol(s) if s != "-" else "-"
             
-            if p == "-" or p == "" or sn == "-": continue
+            if p == "-" or p == "": continue
             l_p, l_s = p, s
             
             row_data = {}

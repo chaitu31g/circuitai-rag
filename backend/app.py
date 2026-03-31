@@ -439,7 +439,7 @@ def format_exact_match_table(query: str, sources: list) -> str:
     def normalize_param(p: str) -> str:
         if not p:
             return ""
-        p = str(p).lower().replace("_", " ")
+        p = str(p).lower().replace("_", " ").strip(":.,!? ")
         p = re.sub(r"\s+", " ", p).strip()
         return p
 
@@ -493,7 +493,7 @@ def format_exact_match_table(query: str, sources: list) -> str:
                     p_val = v
                     break
             param_norm = normalize_param(p_val)
-            if param_norm and user_query_norm in param_norm:
+            if param_norm and (user_query_norm in param_norm or param_norm in user_query_norm):
                 exact_matches.append(r)
                 
     print(f"DEBUG: FILTERED: {len(exact_matches)}", flush=True)
