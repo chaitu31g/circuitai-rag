@@ -428,10 +428,10 @@ def health_check():
 class ChatRequest(BaseModel):
     query: str
     component_filter: str | None = None
-    top_k: int = 50         # raised to 50 — broader pool for summarization pipeline
-    max_new_tokens: int = 1200  # raised: multi-row tables need room to generate all condition rows
-    temperature: float = 0.1  # lowered: stricter extraction fidelity
-    use_section_summary: bool = False   # enable multi-step section summarization
+    top_k: int = 5
+    max_new_tokens: int = 1200
+    temperature: float = 0.1
+    use_section_summary: bool = False
 
 
 @app.post("/chat")
@@ -454,16 +454,11 @@ def chat(req: ChatRequest):
         if not context:
             answer = "No relevant context found in the knowledge base for this query."
         else:
-            if req.use_section_summary:
-                prompt = build_synthesis_prompt(section_context=context, query=req.query)
-            else:
-                prompt = build_prompt(context=context, query=req.query)
-            answer = generate_response(
-                prompt,
-                model_id=config.hf_model,
-                max_new_tokens=req.max_new_tokens,
-                temperature=req.temperature,
-            )
+            db_rows = []
+            for idx, doc in enumerate(sources):
+                doc_text = doc.get('text', '').strip()
+                db_rows.append(f'Row {idx+1}:\n{doc_text}')
+            answer = '\n\n'.join(db_rows)
 
         return {"answer": answer, "sources": sources}
     except Exception as e:
@@ -516,24 +511,15 @@ def chat_stream(req: ChatRequest):
                 yield _sse({"type": "done"})
                 return
 
-            # ── 5. Build prompt (standard or synthesis) ──────────────────────────
-            if req.use_section_summary:
-                prompt = build_synthesis_prompt(section_context=context, query=req.query)
-            else:
-                prompt = build_prompt(context=context, query=req.query)
-
-            # ── 6. Stream tokens ─────────────────────────────────────────────────
-            token_count = 0
-            for token in stream_response(
-                prompt,
-                model_id=config.hf_model,
-                max_new_tokens=req.max_new_tokens,
-                temperature=req.temperature,
-            ):
-                yield _sse({"type": "token", "token": token})
-                token_count += 1
-                if token_count % 30 == 0:
-                    yield _keepalive()
+            # ── 5. Bypass LLM for Exact Extraction ───────────────────────────────
+            db_rows = []
+            for idx, doc in enumerate(sources):
+                doc_text = doc.get("text", "").strip()
+                db_rows.append(f"Row {idx+1}:\n{doc_text}")
+            
+            answer = "\n\n".join(db_rows)
+            yield _sse({"type": "token", "token": answer})
+            yield _keepalive()
 
             yield _sse({"type": "done"})
 

@@ -57,13 +57,12 @@ def get_api_key() -> str:
             
     return ""
 
-# ───────────────────────────────────────────────────────────
 # ── LlamaParse Instruction ──────────────────────────────────────────────────
 _STRICT_SEMICONDUCTOR_INSTRUCTION = (
     "Extract all semiconductor characteristic and rating tables strictly.\n"
     "Schema Rules:\n"
-    "1. Columns: Parameter | Symbol | Conditions | Value | Unit.\n"
-    "2. If Min/Typ/Max exist, use: Parameter | Symbol | Conditions | Min | Typ | Max | Unit.\n"
+    "1. Columns MUST be exactly: Parameter | Symbol | Condition | Value | Unit.\n"
+    "2. DO NOT include Min, Typ, Max, or combined columns. Pick the most representative single value.\n"
     "3. Repeat labels for every row (un-merge cells).\n"
     "4. DO NOT USE LATEX for symbols. Use plain text (ID, VGS, TA, TJ).\n"
     "5. NO backslashes in symbols. NO underscores like I\\_D. ALWAYS USE plain characters.\n"
@@ -127,7 +126,9 @@ def extract_tables_from_markdown(md_text: str) -> List[List[List[str]]]:
 def process_llamaparse_tables(tables: List[List[List[str]]], part_number: str) -> List[Chunk]:
     """Process LlamaParse markdown tables using strict structured extraction (No LLM, no guessing)."""
     all_chunks = []
-    seen_rows = set() # (parameter, symbol, condition, value)
+    seen_rows = set() # (parameter, symbol, condition, value, unit)
+    
+    total_raw_rows = 0
     
     def normalize_symbol(sym: str) -> str:
         if not sym or sym == "-": return "-"
@@ -136,12 +137,30 @@ def process_llamaparse_tables(tables: List[List[List[str]]], part_number: str) -
         sym = re.sub(r"^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$", "", sym)
         return sym or "-"
 
-    def clean_engineering_text(text: str) -> str:
+    def normalize_condition(text: str) -> str:
         if not text or text == "-": return "-"
         text = text.replace("\\_", "_").replace("\\", "").replace("Condition:", "")
+        # Remove line breaks and trim whitespace
+        text = text.replace("\n", " ").replace("\r", " ")
         text = re.sub(r"\s+", " ", text).strip()
         text = text.replace("T = ", "T=")
         return text or "-"
+
+    def split_value_unit(val_str: str, unit_str: str) -> Tuple[Optional[float], str]:
+        val_str = val_str.strip()
+        unit_str = unit_str.strip() if unit_str and unit_str != "-" else ""
+        combined = f"{val_str} {unit_str}".strip()
+        
+        # Split using regex to extract float and trailing unit
+        match = re.search(r"(-?\d+(?:\.\d+)?)[\s]*([^0-9]*)$", combined)
+        if match:
+            try:
+                val = float(match.group(1))
+                unit = match.group(2).strip()
+                return val, unit
+            except ValueError:
+                pass
+        return None, ""
 
     for i, tbl in enumerate(tables):
         if len(tbl) < 2: continue
@@ -149,29 +168,23 @@ def process_llamaparse_tables(tables: List[List[List[str]]], part_number: str) -
         header = [h.strip().lower() for h in tbl[0]]
         
         # ── STRICT COLUMN MAPPING (No guessing) ─────────────────────────────────
-        p_idx = -1
-        s_idx = -1
-        c_idx = -1
-        v_idx, min_idx, typ_idx, max_idx, u_idx = -1, -1, -1, -1, -1
+        p_idx, s_idx, c_idx, v_idx, u_idx = -1, -1, -1, -1, -1
         
         for idx, h in enumerate(header):
-            if "parameter" in h.lower(): p_idx = idx
-            elif "symbol" in h.lower(): s_idx = idx
-            elif "condition" in h.lower() or "test" in h.lower(): c_idx = idx
-            elif "min" in h.lower(): min_idx = idx
-            elif "typ" in h.lower() or "nominal" in h.lower(): typ_idx = idx
-            elif "max" in h.lower(): max_idx = idx
-            elif "value" in h.lower(): v_idx = idx
-            elif "unit" in h.lower(): u_idx = idx
+            if "parameter" in h: p_idx = idx
+            elif "symbol" in h: s_idx = idx
+            elif "condition" in h or "test" in h: c_idx = idx
+            elif "value" in h: v_idx = idx
+            elif "unit" in h: u_idx = idx
             
         # ── VALIDATION BEFORE STORAGE ───────────────────────────────────────────
         # Store only if parameter and symbol exist, plus at least one value column
-        if p_idx == -1 or s_idx == -1: continue
-        if v_idx == -1 and min_idx == -1 and typ_idx == -1 and max_idx == -1: continue
+        if p_idx == -1 or s_idx == -1 or v_idx == -1: continue
 
         # ── 1:1 ROW EXTRACTION ────────────────────────────────────────────────
         l_p, l_s, l_c = "-", "-", "-"
         for row in tbl[1:]:
+            total_raw_rows += 1
             if not any(row): continue
             
             def get_cell(idx):
@@ -180,55 +193,56 @@ def process_llamaparse_tables(tables: List[List[List[str]]], part_number: str) -
             p = get_cell(p_idx)
             s = get_cell(s_idx)
             c = get_cell(c_idx)
+            v = get_cell(v_idx)
             u = get_cell(u_idx)
             
             p = p if p != "-" else l_p
             s = s if s != "-" else l_s
             c = c if (c != "-" or p != l_p) else l_c
             
+            p = p.strip()
             sn = normalize_symbol(s)
-            cn = clean_engineering_text(c)
+            cn = normalize_condition(c)
             
             if p == "-" or p == "" or sn == "-": continue
             l_p, l_s, l_c = p, s, c
             
-            # Value extraction EXACTLY as provided
-            val_text = ""
-            val_for_key = ""
+            if v == "-": continue
+            val_float, unit_str = split_value_unit(v, u)
+            if val_float is None: continue
             
-            if min_idx != -1 or typ_idx != -1 or max_idx != -1:
-                vmin = get_cell(min_idx)
-                vtyp = get_cell(typ_idx)
-                vmax = get_cell(max_idx)
-                if vmin == "-" and vtyp == "-" and vmax == "-": continue
-                
-                if vmin != "-": val_text += f"\nMin: {vmin}"
-                if vtyp != "-": val_text += f"\nTyp: {vtyp}"
-                if vmax != "-": val_text += f"\nMax: {vmax}"
-                val_for_key = vtyp if vtyp != "-" else (vmax if vmax != "-" else vmin)
-            else:
-                v = get_cell(v_idx)
-                if v == "-": continue
-                val_text = f"\nValue: {v}"
-                val_for_key = v
-                
+            # Lowercase for deduplication
+            p_norm = p.lower()
+            sn_norm = sn.lower()
+            cn_norm = cn.lower()
+            u_norm = unit_str.lower()
+            
             # ── DEDUPLICATION (MANDATORY) ─────────────────────────────────────
-            # (parameter, symbol, condition, value)
-            row_key = (p.lower(), sn.lower(), cn.lower(), val_for_key.lower())
+            # Create a unique hash using parameter + symbol + condition + value + unit
+            row_key = (p_norm, sn_norm, cn_norm, val_float, u_norm)
             if row_key in seen_rows: continue
             seen_rows.add(row_key)
             
             # ── CORRECT CHUNK FORMAT ──────────────────────────────────────────
-            ctext = f"Parameter: {p}\nSymbol: {sn}\nCondition: {cn}{val_text}"
-            if u != "-": ctext += f"\nUnit: {u}"
+            ctext = f"Parameter: {p}\nSymbol: {sn}\nCondition: {cn}\nValue: {val_float}\nUnit: {unit_str}"
             
             metadata = {
-                "component": part_number,
+                "component": "nmos_infineon", # as requested
                 "type": "table",
                 "source": "llamaparse",
+                "parameter": p,
+                "symbol": sn,
+                "condition": cn,
+                "value": val_float,
+                "unit": unit_str
             }
             all_chunks.append(Chunk(text=ctext.strip(), chunk_type="parameter_row", metadata=metadata))
             
+    print(f"DEBUG: Number of rows before deduplication: {total_raw_rows}")
+    print(f"DEBUG: Number of rows after deduplication: {len(all_chunks)}")
+    if all_chunks:
+        print(f"DEBUG: Sample stored document: {all_chunks[0].text}")
+        
     return all_chunks
 
 def run_llamaparse_extraction(pdf_path: str, part_number: str) -> List[Chunk]:

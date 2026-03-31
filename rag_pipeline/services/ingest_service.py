@@ -112,8 +112,8 @@ def ingest_pdf_pipeline(pdf_path: str, job_id: str) -> None:
     if re.match(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}_", original_name):
         original_name = original_name[37:]
         
-    clean_stem    = Path(original_name).stem.replace(" ", "_").replace("/", "")
-    part_number   = clean_stem
+    clean_stem    = "nmos_infineon"
+    part_number   = "nmos_infineon"
 
     # Install stdout capture + logging handler so all output goes to job terminal
     stdout_cap  = _StdoutCapture(job_id, sys.stdout)
