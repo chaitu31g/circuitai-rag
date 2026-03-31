@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     # ChromaDB — use the same absolute path as db_dir so it resolves correctly
     # regardless of which directory uvicorn is launched from (critical in Colab)
     chroma_persist_dir: str = str(PROJECT_ROOT / "data" / "vectordb")
-    chroma_collection:  str = "datasheets"
+    chroma_collection:  str = "components_db"
     chroma_server_nofile: int = 4096
 
     # HuggingFace LLM — change HF_MODEL env var in Colab to switch models

@@ -466,6 +466,7 @@ def format_exact_match_table(query: str, sources: list) -> str:
         print(f"DEBUG: RAW DOCUMENT: {doc_text}", flush=True)
         try:
             parsed = json.loads(doc_text)
+            parsed["___comp___"] = doc.get("component") or "unknown"
             rows.append(parsed)
             lower_parsed = {str(k).lower(): v for k, v in parsed.items()}
             print(f"DEBUG: PARSED ROW: {lower_parsed}", flush=True)
@@ -510,6 +511,8 @@ def format_exact_match_table(query: str, sources: list) -> str:
             
             n_col = normalize_col(k)
             norm_row[n_col] = str(v).strip()
+            
+        norm_row["Component"] = str(m.get("___comp___", "unknown"))
         normalized_matches.append(norm_row)
 
     all_available = set()
@@ -529,6 +532,8 @@ def format_exact_match_table(query: str, sources: list) -> str:
             
     if "Unit" in all_available:
         ordered_cols.append("Unit")
+        
+    ordered_cols.append("Component")
 
     def extract_temp(m):
         c_val = m.get("Condition", "")
@@ -857,7 +862,7 @@ def delete_library_component(component_id: str):
     try:
         store = ChromaStore(
             persist_dir=Path(config.chroma_persist_dir),
-            collection_name=component_id,
+            collection_name=config.chroma_collection,
         )
         deleted_count = store.delete_component(component_id)
 

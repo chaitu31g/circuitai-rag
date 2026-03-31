@@ -122,67 +122,31 @@ class ChromaStore(VectorStore):
         n_results: int = 5,
         filters: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
-        """Multi-Collection Nearest-neighbour search."""
-        collections_to_search = []
-        
-        comp_target = None
-        if filters and "component" in filters:
-            inner = filters["component"]
-            if isinstance(inner, dict) and "$eq" in inner:
-                comp_target = inner["$eq"]
-            elif isinstance(inner, str):
-                comp_target = inner
-                
-        if comp_target:
-            try: collections_to_search.append(self._client.get_collection(name=comp_target))
-            except: pass
-        else:
-            try:
-                collections = self._client.list_collections()
-                collections_to_search = [self._client.get_collection(name=c if isinstance(c, str) else c.name) for c in collections]
-            except Exception as e:
-                logger.error(f"Failed to load collections: {e}")
+        try:
+            res = self._collection.query(
+                query_embeddings=[query_embedding],
+                n_results=n_results,
+                where=filters
+            )
             
-        local_filters = {k: v for k, v in filters.items() if k != "component"} if filters else None
-        if not local_filters: local_filters = None
+            ids = res.get("ids", [[]])[0]
+            docs = res.get("documents", [[]])[0]
+            metas = res.get("metadatas", [[]])[0]
+            dists = res.get("distances", [[]])[0]
             
-        all_results = []
-        for col in collections_to_search:
-            total = col.count()
-            if total == 0: continue
-            
-            effective_n = min(n_results, total)
-            if local_filters:
-                try:
-                    res = col.get(where=local_filters, include=[])
-                    effective_n = min(n_results, len(res.get("ids", [])))
-                except: pass
-            if effective_n <= 0: continue
-            
-            try:
-                res = col.query(
-                    query_embeddings=[query_embedding],
-                    n_results=effective_n,
-                    where=local_filters
-                )
-                
-                ids = res.get("ids", [[]])[0]
-                docs = res.get("documents", [[]])[0]
-                metas = res.get("metadatas", [[]])[0]
-                dists = res.get("distances", [[]])[0]
-                
-                for iid, txt, mta, dst in zip(ids, docs, metas, dists):
-                    if "component" not in mta: mta["component"] = col.name
-                    all_results.append({
-                        "id": iid,
-                        "text": txt,
-                        "metadata": mta,
-                        "score": 1.0 - (dst or 0.0)
-                    })
-            except: pass
-            
-        all_results.sort(key=lambda x: x.get("score", 0), reverse=True)
-        return all_results[:n_results]
+            all_results = []
+            for iid, txt, mta, dst in zip(ids, docs, metas, dists):
+                if "component" not in mta: mta["component"] = "unknown"
+                all_results.append({
+                    "id": iid,
+                    "text": txt,
+                    "metadata": mta,
+                    "score": 1.0 - (dst or 0.0)
+                })
+            return all_results
+        except Exception as e:
+            logger.error(f"ChromaStore query failed: {e}")
+            return []
 
     # -------------------------------------------------
     # DELETE
@@ -191,40 +155,39 @@ class ChromaStore(VectorStore):
         self._collection.delete(ids=list(ids))
 
     def delete_component(self, part_number: str) -> int:
-        """Delete entire collection directly."""
+        """Delete component entries from single collection."""
         try:
-            col = self._client.get_collection(name=part_number)
-            count = col.count()
-            self._client.delete_collection(name=part_number)
-            return count
+            ct = self._collection.count()
+            self._collection.delete(where={"component": part_number})
+            after = self._collection.count()
+            return ct - after
         except: return 0
 
     # -------------------------------------------------
     # COUNT
     # -------------------------------------------------
     def count(self) -> int:
-        try:
-            collections = self._client.list_collections()
-            return sum(self._client.get_collection(name=c if isinstance(c, str) else c.name).count() for c in collections)
-        except Exception:
-            return 0
+        return self._collection.count()
 
     # -------------------------------------------------
     # LIBRARY — unique components in the collection
     # -------------------------------------------------
     def get_library(self) -> List[Dict[str, Any]]:
-        try:
-            collections = self._client.list_collections()
-        except Exception as e:
-            raise RuntimeError(f"Failed to load collections: {e}")
-            
+        raw = self._collection.get(include=["metadatas"])
+        metas = raw.get("metadatas") or []
+        
+        comps = {}
+        for m in metas:
+            c = m.get("component")
+            if c:
+                if c not in comps: comps[c] = 0
+                comps[c] += 1
+                
         result = []
-        for c in collections:
-            c_name = c if isinstance(c, str) else c.name
-            collection = self._client.get_collection(name=c_name)
+        for c_name, count in comps.items():
             result.append({
                 "component_id": c_name,
-                "chunk_count": collection.count(),
+                "chunk_count": count,
                 "chunk_types": ["text", "table", "figure"]
             })
             
