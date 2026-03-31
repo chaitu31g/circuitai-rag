@@ -124,10 +124,9 @@ def extract_tables_from_markdown(md_text: str) -> List[List[List[str]]]:
     return tables
 
 def process_llamaparse_tables(tables: List[List[List[str]]], part_number: str) -> List[Chunk]:
-    """Process LlamaParse markdown tables using strict structured extraction (No LLM, no guessing)."""
+    # Process LlamaParse markdown tables using strict structured extraction and dynamic columns.
     all_chunks = []
-    seen_rows = set() # (parameter, symbol, condition, value, unit)
-    
+    seen_rows = set()
     total_raw_rows = 0
     
     def normalize_symbol(sym: str) -> str:
@@ -140,102 +139,86 @@ def process_llamaparse_tables(tables: List[List[List[str]]], part_number: str) -
     def normalize_condition(text: str) -> str:
         if not text or text == "-": return "-"
         text = text.replace("\\_", "_").replace("\\", "").replace("Condition:", "")
-        # Remove line breaks and trim whitespace
         text = text.replace("\n", " ").replace("\r", " ")
         text = re.sub(r"\s+", " ", text).strip()
         text = text.replace("T = ", "T=")
         return text or "-"
 
-    def split_value_unit(val_str: str, unit_str: str) -> Tuple[Optional[float], str]:
-        val_str = val_str.strip()
-        unit_str = unit_str.strip() if unit_str and unit_str != "-" else ""
-        combined = f"{val_str} {unit_str}".strip()
-        
-        # Split using regex to extract float and trailing unit
-        match = re.search(r"(-?\d+(?:\.\d+)?)[\s]*([^0-9]*)$", combined)
-        if match:
-            try:
-                val = float(match.group(1))
-                unit = match.group(2).strip()
-                return val, unit
-            except ValueError:
-                pass
-        return None, ""
-
     for i, tbl in enumerate(tables):
         if len(tbl) < 2: continue
         
-        header = [h.strip().lower() for h in tbl[0]]
+        raw_header = [h.strip() for h in tbl[0]]
+        header = [h.lower() for h in raw_header]
         
-        # ── STRICT COLUMN MAPPING (No guessing) ─────────────────────────────────
-        p_idx, s_idx, c_idx, v_idx, u_idx = -1, -1, -1, -1, -1
-        
+        p_idx, s_idx = -1, -1
         for idx, h in enumerate(header):
             if "parameter" in h: p_idx = idx
             elif "symbol" in h: s_idx = idx
-            elif "condition" in h or "test" in h: c_idx = idx
-            elif "value" in h: v_idx = idx
-            elif "unit" in h: u_idx = idx
             
-        # ── VALIDATION BEFORE STORAGE ───────────────────────────────────────────
-        # Store only if parameter and symbol exist, plus at least one value column
-        if p_idx == -1 or s_idx == -1 or v_idx == -1: continue
+        if p_idx == -1 or s_idx == -1: continue
 
-        # ── 1:1 ROW EXTRACTION ────────────────────────────────────────────────
         l_p, l_s, l_c = "-", "-", "-"
         for row in tbl[1:]:
             total_raw_rows += 1
             if not any(row): continue
             
-            def get_cell(idx):
-                return row[idx].strip() if idx != -1 and idx < len(row) else "-"
-                
-            p = get_cell(p_idx)
-            s = get_cell(s_idx)
-            c = get_cell(c_idx)
-            v = get_cell(v_idx)
-            u = get_cell(u_idx)
+            p = row[p_idx].strip() if p_idx < len(row) else "-"
+            s = row[s_idx].strip() if s_idx < len(row) else "-"
             
             p = p if p != "-" else l_p
             s = s if s != "-" else l_s
-            c = c if (c != "-" or p != l_p) else l_c
             
             p = p.strip()
             sn = normalize_symbol(s)
-            cn = normalize_condition(c)
             
             if p == "-" or p == "" or sn == "-": continue
-            l_p, l_s, l_c = p, s, c
+            l_p, l_s = p, s
             
-            if v == "-": continue
-            val_float, unit_str = split_value_unit(v, u)
-            if val_float is None: continue
+            row_data = {}
+            has_value_column = False
+            for col_idx, col_name in enumerate(raw_header):
+                if not col_name: continue
+                val = row[col_idx].strip() if col_idx < len(row) else "-"
+                if val == "-": continue
+                
+                lower_col = col_name.lower()
+                if "condition" in lower_col or "test" in lower_col:
+                    val = normalize_condition(val)
+                    if val != "-":
+                        l_c = val
+                    else:
+                        val = l_c
+                
+                if "min" in lower_col or "typ" in lower_col or "max" in lower_col or "value" in lower_col:
+                    has_value_column = True
+                
+                # Dynamic column capture
+                row_data[col_name] = val
+                
+            if not has_value_column: continue
+
+            # Create unique hash
+            hash_parts = []
+            for k in sorted(row_data.keys()):
+                hash_parts.append(f"{k.lower()}:{str(row_data[k]).lower()}")
+            row_key_tuple = tuple(hash_parts)
             
-            # Lowercase for deduplication
-            p_norm = p.lower()
-            sn_norm = sn.lower()
-            cn_norm = cn.lower()
-            u_norm = unit_str.lower()
+            if row_key_tuple in seen_rows: continue
+            seen_rows.add(row_key_tuple)
             
-            # ── DEDUPLICATION (MANDATORY) ─────────────────────────────────────
-            # Create a unique hash using parameter + symbol + condition + value + unit
-            row_key = (p_norm, sn_norm, cn_norm, val_float, u_norm)
-            if row_key in seen_rows: continue
-            seen_rows.add(row_key)
-            
-            # ── CORRECT CHUNK FORMAT ──────────────────────────────────────────
-            ctext = f"Parameter: {p}\nSymbol: {sn}\nCondition: {cn}\nValue: {val_float}\nUnit: {unit_str}"
+            ctext = "\n".join(f"{k}: {v}" for k, v in row_data.items())
             
             metadata = {
-                "component": "nmos_infineon", # as requested
+                "component": "nmos_infineon",
                 "type": "table",
                 "source": "llamaparse",
                 "parameter": p,
-                "symbol": sn,
-                "condition": cn,
-                "value": val_float,
-                "unit": unit_str
+                "symbol": sn
             }
+            # Inject dynamic columns into metadata
+            for k, v in row_data.items():
+                metadata[k.lower()] = str(v)
+                
             all_chunks.append(Chunk(text=ctext.strip(), chunk_type="parameter_row", metadata=metadata))
             
     print(f"DEBUG: Number of rows before deduplication: {total_raw_rows}")

@@ -428,10 +428,65 @@ def health_check():
 class ChatRequest(BaseModel):
     query: str
     component_filter: str | None = None
-    top_k: int = 5
+    top_k: int = 50
     max_new_tokens: int = 1200
     temperature: float = 0.1
     use_section_summary: bool = False
+
+def format_exact_match_table(query: str, sources: list) -> str:
+    user_query = query.strip().lower()
+    
+    exact_matches = []
+    for doc in sources:
+        meta = doc.get("metadata", {})
+        param = str(meta.get("parameter", "")).strip().lower()
+        if param == user_query:
+            exact_matches.append(meta)
+            
+    if not exact_matches:
+        return ""
+        
+    all_columns = []
+    for m in exact_matches:
+        for k in m.keys():
+            k_lower = k.lower()
+            if k_lower not in ["component", "type", "source", "chunk_type", "id", "score", "part_number", "page", "table_index"]:
+                if k not in all_columns and k_lower not in [c.lower() for c in all_columns]:
+                    all_columns.append(k)
+                    
+    ordered_cols = []
+    for pref in ["parameter", "symbol", "condition", "min", "typ", "max", "value", "unit"]:
+        for c in all_columns:
+             if c.lower() == pref and c not in ordered_cols:
+                 ordered_cols.append(c)
+    for c in all_columns:
+        if c not in ordered_cols:
+            ordered_cols.append(c)
+            
+    import re
+    def extract_temp(m):
+        for k, v in m.items():
+            if "condition" in k.lower() or "test" in k.lower():
+                t_match = re.search(r"(-?\d+)\s*(?:°|deg)?C", str(v), re.IGNORECASE)
+                if t_match:
+                    return float(t_match.group(1))
+        return 0.0
+        
+    exact_matches.sort(key=extract_temp)
+    
+    header_row = "| " + " | ".join([c.capitalize() for c in ordered_cols]) + " |"
+    sep_row = "| " + " | ".join(["---"] * len(ordered_cols)) + " |"
+    
+    rows = []
+    for m in exact_matches:
+        row_vals = []
+        for c in ordered_cols:
+            val = m.get(c, m.get(c.lower(), "-"))
+            row_vals.append(str(val))
+        rows.append("| " + " | ".join(row_vals) + " |")
+        
+    return "\n".join([header_row, sep_row] + rows)
+
 
 
 @app.post("/chat")
@@ -454,11 +509,11 @@ def chat(req: ChatRequest):
         if not context:
             answer = "No relevant context found in the knowledge base for this query."
         else:
-            db_rows = []
-            for idx, doc in enumerate(sources):
-                doc_text = doc.get('text', '').strip()
-                db_rows.append(f'Row {idx+1}:\n{doc_text}')
-            answer = '\n\n'.join(db_rows)
+            table_answer = format_exact_match_table(req.query, sources)
+            if table_answer:
+                answer = table_answer
+            else:
+                answer = "No exact match found for parameter: " + req.query
 
         return {"answer": answer, "sources": sources}
     except Exception as e:
@@ -512,12 +567,12 @@ def chat_stream(req: ChatRequest):
                 return
 
             # ── 5. Bypass LLM for Exact Extraction ───────────────────────────────
-            db_rows = []
-            for idx, doc in enumerate(sources):
-                doc_text = doc.get("text", "").strip()
-                db_rows.append(f"Row {idx+1}:\n{doc_text}")
-            
-            answer = "\n\n".join(db_rows)
+            table_answer = format_exact_match_table(req.query, sources)
+            if table_answer:
+                answer = table_answer
+            else:
+                answer = "No exact match found for parameter: " + req.query
+                
             yield _sse({"type": "token", "token": answer})
             yield _keepalive()
 
