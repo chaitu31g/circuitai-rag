@@ -227,10 +227,50 @@ def process_llamaparse_tables(tables: List[List[List[str]]], part_number: str) -
         
     return all_chunks
 
+def extract_text_chunks_from_markdown(md_text: str, part_number: str) -> List[Chunk]:
+    chunks = []
+    lines = md_text.split("\n")
+    current_chunk = []
+    current_length = 0
+    
+    for line in lines:
+        line = line.strip()
+        if not line: continue
+        if line.startswith("|") or "-|-" in line or "|---" in line: continue
+        
+        current_chunk.append(line)
+        current_length += len(line)
+        
+        if current_length >= 400:
+            text_block = " ".join(current_chunk)
+            chunks.append(Chunk(
+                text=text_block,
+                chunk_type="text",
+                metadata={"component": part_number, "type": "text"}
+            ))
+            current_chunk = []
+            current_length = 0
+            
+    if current_chunk:
+        text_block = " ".join(current_chunk)
+        chunks.append(Chunk(
+            text=text_block,
+            chunk_type="text",
+            metadata={"component": part_number, "type": "text"}
+        ))
+        
+    print(f"DEBUG: Number of text chunks extracted: {len(chunks)}")
+    return chunks
+
 def run_llamaparse_extraction(pdf_path: str, part_number: str) -> List[Chunk]:
     try:
         try: loop = asyncio.get_event_loop()
         except RuntimeError: loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
         md = loop.run_until_complete(parse_pdf_with_llamaparse(pdf_path))
-        return process_llamaparse_tables(extract_tables_from_markdown(md), part_number)
+        
+        table_chunks = process_llamaparse_tables(extract_tables_from_markdown(md), part_number)
+        text_chunks = extract_text_chunks_from_markdown(md, part_number)
+        
+        return table_chunks + text_chunks
     except Exception as e: print(f"💥 LLAMAPARSE CRITICAL FAILURE: {str(e)}"); raise
+

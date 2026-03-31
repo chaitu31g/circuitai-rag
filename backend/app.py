@@ -582,7 +582,14 @@ def chat(req: ChatRequest):
             if table_answer:
                 answer = table_answer
             else:
-                answer = "No exact match found for parameter: " + req.query
+                text_sources = [s for s in sources if s.get("type", "") == "text"]
+                if text_sources:
+                    from backend.llm.hf_llm import build_prompt, generate_response
+                    text_context = "\n\n".join([s.get("text", "") for s in text_sources[:3]])
+                    prompt = build_prompt(text_context, req.query)
+                    answer = generate_response(prompt)
+                else:
+                    answer = "No exact match found for parameter: " + req.query
 
         return {"answer": answer, "sources": sources}
     except Exception as e:
@@ -638,11 +645,17 @@ def chat_stream(req: ChatRequest):
             # ── 5. Bypass LLM for Exact Extraction ───────────────────────────────
             table_answer = format_exact_match_table(req.query, sources)
             if table_answer:
-                answer = table_answer
+                yield _sse({"type": "token", "token": table_answer})
             else:
-                answer = "No data found"
-                
-            yield _sse({"type": "token", "token": answer})
+                text_sources = [s for s in sources if s.get("type", "") == "text"]
+                if text_sources:
+                    from backend.llm.hf_llm import build_prompt, stream_response
+                    text_context = "\n\n".join([s.get("text", "") for s in text_sources[:3]])
+                    prompt = build_prompt(text_context, req.query)
+                    for token in stream_response(prompt):
+                        yield _sse({"type": "token", "token": token})
+                else:
+                    yield _sse({"type": "token", "token": "No data found"})
             yield _keepalive()
 
             yield _sse({"type": "done"})
