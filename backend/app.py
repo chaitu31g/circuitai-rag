@@ -428,13 +428,14 @@ def health_check():
 class ChatRequest(BaseModel):
     query: str
     component_filter: str | None = None
-    top_k: int = 50
+    top_k: int = 5
     max_new_tokens: int = 1200
     temperature: float = 0.1
     use_section_summary: bool = False
 
 def format_exact_match_table(query: str, sources: list) -> str:
     import re
+    import json
     def normalize_param(p: str) -> str:
         if not p:
             return ""
@@ -443,24 +444,45 @@ def format_exact_match_table(query: str, sources: list) -> str:
         return p
 
     user_query_norm = normalize_param(query)
-    print(f"DEBUG: Normalized user query: '{user_query_norm}'", flush=True)
-    
-    exact_matches = []
+    print(f"DEBUG: QUERY: '{query}'", flush=True)
+    print(f"DEBUG: NORMALIZED: '{user_query_norm}'", flush=True)
+
+    rows = []
     for doc in sources:
-        meta = doc.get("metadata", {})
-        param_norm = normalize_param(meta.get("parameter", ""))
-        print(f"DEBUG: Stored param: '{param_norm}'", flush=True)
+        doc_text = doc.get("text", "").strip()
+        print(f"DEBUG: RAW DOCUMENT: {doc_text}", flush=True)
+        try:
+            parsed = json.loads(doc_text)
+            rows.append(parsed)
+            lower_parsed = {str(k).lower(): v for k, v in parsed.items()}
+            print(f"DEBUG: PARSED ROW: {lower_parsed}", flush=True)
+        except Exception as e:
+            print(f"DEBUG: PARSE FAILED for document: {doc_text}", flush=True)
+
+    exact_matches = []
+    for r in rows:
+        p_val = ""
+        for k, v in r.items():
+            if str(k).lower() == "parameter":
+                p_val = v
+                break
+        param_norm = normalize_param(p_val)
+        print(f"DEBUG: DB PARAM: {repr(param_norm)}", flush=True)
         if param_norm == user_query_norm:
-            exact_matches.append(meta)
+            exact_matches.append(r)
             
     if not exact_matches:
-        print(f"DEBUG: No exact match found for '{user_query_norm}'. Trying substring.", flush=True)
-        for doc in sources:
-            meta = doc.get("metadata", {})
-            param_norm = normalize_param(meta.get("parameter", ""))
-            if param_norm and (user_query_norm in param_norm or param_norm in user_query_norm):
-                exact_matches.append(meta)
+        for r in rows:
+            p_val = ""
+            for k, v in r.items():
+                if str(k).lower() == "parameter":
+                    p_val = v
+                    break
+            param_norm = normalize_param(p_val)
+            if param_norm and user_query_norm in param_norm:
+                exact_matches.append(r)
                 
+    print(f"DEBUG: FILTERED: {len(exact_matches)}", flush=True)
     if not exact_matches:
         return ""
         
@@ -483,7 +505,7 @@ def format_exact_match_table(query: str, sources: list) -> str:
             
     def extract_temp(m):
         for k, v in m.items():
-            if "condition" in k.lower() or "test" in k.lower():
+            if "condition" in str(k).lower() or "test" in str(k).lower():
                 t_match = re.search(r"(-?\d+)\s*(?:°|deg)?C", str(v), re.IGNORECASE)
                 if t_match:
                     return float(t_match.group(1))
@@ -494,15 +516,19 @@ def format_exact_match_table(query: str, sources: list) -> str:
     header_row = "| " + " | ".join([c.capitalize() for c in ordered_cols]) + " |"
     sep_row = "| " + " | ".join(["---"] * len(ordered_cols)) + " |"
     
-    rows = []
+    res_rows = []
     for m in exact_matches:
         row_vals = []
         for c in ordered_cols:
-            val = m.get(c, m.get(c.lower(), "-"))
+            val = "-"
+            for k, v in m.items():
+                if str(k).lower() == c.lower():
+                    val = v
+                    break
             row_vals.append(str(val))
-        rows.append("| " + " | ".join(row_vals) + " |")
+        res_rows.append("| " + " | ".join(row_vals) + " |")
         
-    return "\n".join([header_row, sep_row] + rows)
+    return "\n".join([header_row, sep_row] + res_rows)
 
 
 
@@ -588,7 +614,7 @@ def chat_stream(req: ChatRequest):
             if table_answer:
                 answer = table_answer
             else:
-                answer = "No exact match found for parameter: " + req.query
+                answer = "No data found"
                 
             yield _sse({"type": "token", "token": answer})
             yield _keepalive()
