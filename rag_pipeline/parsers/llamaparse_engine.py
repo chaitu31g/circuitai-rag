@@ -208,7 +208,7 @@ def process_llamaparse_tables(tables: List[List[List[str]]], part_number: str) -
             import json
             ctext = json.dumps(row_data)
             metadata = {
-                "component": "nmos_infineon",
+                "component": part_number,
                 "type": "table",
                 "source": "llamaparse",
                 "parameter": p,
