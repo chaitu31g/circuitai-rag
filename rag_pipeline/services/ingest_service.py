@@ -251,6 +251,7 @@ def ingest_pdf_pipeline(pdf_path: str, job_id: str) -> None:
             
             seen_ids.add(chunk_id)
             chunk["id"] = chunk_id
+            meta["part_number"] = part_number
             chunk["metadata"] = _flatten_metadata(meta)
             final_embedded.append(chunk)
 
@@ -261,8 +262,8 @@ def ingest_pdf_pipeline(pdf_path: str, job_id: str) -> None:
             expected_dim=dim or 1024,
         )
         
-        # ── 6. CLEAR COLLECTION BEFORE INSERT ─────────────────────────────────
-        try: store.collection.delete(where={})
+        # ── 6. CLEAR ONLY THE OLD INSTANCES OF THIS SPECIFIC PDF ─────────────
+        try: store._collection.delete(where={})
         except Exception: pass
 
         before = store.count()
