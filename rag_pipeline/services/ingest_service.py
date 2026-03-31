@@ -228,56 +228,66 @@ def ingest_pdf_pipeline(pdf_path: str, job_id: str) -> None:
 
         # ── 4. REMOVE "unknown" FALLBACK & 5. DEDUPLICATION ID ────────────
         import hashlib
+        import uuid
+        
         final_embedded = []
-        seen_ids = set()
+        seen_texts = set()
+        
+        print(f"DEBUG: Number of rows before cleaning = {len(embedded)}")
         
         for chunk in embedded:
             meta = chunk.get("metadata", {})
             if not meta.get("component"):
-                raise ValueError("Metadata missing 'component'. Abandoning ingestion to prevent 'unknown' fallback collections.")
+                raise ValueError("Metadata missing 'component'. Abandoning ingestion.")
             
-            # Generate deterministic chunk ID precisely as requested
-            chunk_type = meta.get("chunk_type") or meta.get("type", "")
-            if chunk_type == "parameter_row" or chunk_type == "table":
-                p = str(meta.get("parameter", ""))
-                c = str(meta.get("condition", ""))
-                v = str(chunk.get("text", "")) 
-                chunk_id = hashlib.sha256(f"{p}_{c}_{v}".encode("utf-8")).hexdigest()[:16]
-            else:
-                chunk_id = hashlib.sha256(chunk["text"].encode("utf-8")).hexdigest()[:16]
-            
-            if chunk_id in seen_ids:
-                continue # 5. Skip if already exists physically
-            
-            seen_ids.add(chunk_id)
-            chunk["id"] = chunk_id
+            # Use raw string checking for deduplication
+            raw_text = chunk.get("text", "").strip()
+            if not raw_text or raw_text in seen_texts:
+                continue
+                
+            seen_texts.add(raw_text)
+            meta["component"] = part_number  # strictly enforce component metadata
             meta["part_number"] = part_number
             chunk["metadata"] = _flatten_metadata(meta)
+            chunk["id"] = str(uuid.uuid4())
             final_embedded.append(chunk)
+            
+        print(f"DEBUG: Number of rows after cleaning = {len(final_embedded)}")
 
-        # ── 2. FIX COLLECTION NAME & 3. USE get_or_create_collection ────────
         store = ChromaStore(
             persist_dir=Path(config.chroma_persist_dir),
-            collection_name=part_number, 
+            collection_name=config.chroma_collection, 
             expected_dim=dim or 1024,
         )
         
-        # ── 6. CLEAR ONLY THE OLD INSTANCES OF THIS SPECIFIC PDF ─────────────
-        try: store._collection.delete(where={})
+        # CLEAR ONLY THIS PDF's OLD INSTANCES
+        try: store._collection.delete(where={"component": part_number})
         except Exception: pass
 
         before = store.count()
         if final_embedded:
-            store.upsert_chunks(final_embedded)
-            store.persist()
+            ids = [c["id"] for c in final_embedded]
+            embeddings = [c["embedding"] for c in final_embedded]
+            documents = [c["text"] for c in final_embedded]
+            metadatas = [c["metadata"] for c in final_embedded]
+            
+            store._collection.add(
+                documents=documents,
+                metadatas=metadatas,
+                embeddings=embeddings,
+                ids=ids
+            )
             
         after = store.count()
+        
+        print(f"DEBUG: Number of documents inserted = {len(final_embedded)}")
+        print(f"DEBUG: Final DB count = {after}")
         
         # ── 7. VALIDATE STORAGE ───────────────────────────────────────────────
         if after == 0:
             raise RuntimeError(f"Storage validation failed: Collection '{part_number}' is corrupt/empty after ingestion.")
 
-        _log(job_id, f"│  Collection        : '{part_number}'")
+        _log(job_id, f"│  Collection        : '{config.chroma_collection}' ({part_number})")
         _log(job_id, f"│  Collection size   : {after} chunks")
         _log(job_id, f"│  Upserted          : {len(final_embedded)} chunks")
 
