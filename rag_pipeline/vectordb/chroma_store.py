@@ -139,7 +139,7 @@ class ChromaStore(VectorStore):
         else:
             try:
                 collections = self._client.list_collections()
-                collections_to_search = [self._client.get_collection(name=c.name if hasattr(c, "name") else c) for c in collections]
+                collections_to_search = [self._client.get_collection(name=c if isinstance(c, str) else c.name) for c in collections]
             except Exception as e:
                 logger.error(f"Failed to load collections: {e}")
             
@@ -205,7 +205,7 @@ class ChromaStore(VectorStore):
     def count(self) -> int:
         try:
             collections = self._client.list_collections()
-            return sum(self._client.get_collection(name=c.name if hasattr(c, "name") else c).count() for c in collections)
+            return sum(self._client.get_collection(name=c if isinstance(c, str) else c.name).count() for c in collections)
         except Exception:
             return 0
 
@@ -220,7 +220,7 @@ class ChromaStore(VectorStore):
             
         result = []
         for c in collections:
-            c_name = c.name if hasattr(c, "name") else c
+            c_name = c if isinstance(c, str) else c.name
             collection = self._client.get_collection(name=c_name)
             result.append({
                 "component_id": c_name,
