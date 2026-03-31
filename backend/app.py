@@ -434,15 +434,33 @@ class ChatRequest(BaseModel):
     use_section_summary: bool = False
 
 def format_exact_match_table(query: str, sources: list) -> str:
-    user_query = query.strip().lower()
+    import re
+    def normalize_param(p: str) -> str:
+        if not p:
+            return ""
+        p = str(p).lower().replace("_", " ")
+        p = re.sub(r"\s+", " ", p).strip()
+        return p
+
+    user_query_norm = normalize_param(query)
+    print(f"DEBUG: Normalized user query: '{user_query_norm}'", flush=True)
     
     exact_matches = []
     for doc in sources:
         meta = doc.get("metadata", {})
-        param = str(meta.get("parameter", "")).strip().lower()
-        if param == user_query:
+        param_norm = normalize_param(meta.get("parameter", ""))
+        print(f"DEBUG: Stored param: '{param_norm}'", flush=True)
+        if param_norm == user_query_norm:
             exact_matches.append(meta)
             
+    if not exact_matches:
+        print(f"DEBUG: No exact match found for '{user_query_norm}'. Trying substring.", flush=True)
+        for doc in sources:
+            meta = doc.get("metadata", {})
+            param_norm = normalize_param(meta.get("parameter", ""))
+            if param_norm and (user_query_norm in param_norm or param_norm in user_query_norm):
+                exact_matches.append(meta)
+                
     if not exact_matches:
         return ""
         
@@ -463,7 +481,6 @@ def format_exact_match_table(query: str, sources: list) -> str:
         if c not in ordered_cols:
             ordered_cols.append(c)
             
-    import re
     def extract_temp(m):
         for k, v in m.items():
             if "condition" in k.lower() or "test" in k.lower():

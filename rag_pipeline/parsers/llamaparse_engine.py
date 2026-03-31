@@ -205,9 +205,8 @@ def process_llamaparse_tables(tables: List[List[List[str]]], part_number: str) -
             
             if row_key_tuple in seen_rows: continue
             seen_rows.add(row_key_tuple)
-            
-            ctext = "\n".join(f"{k}: {v}" for k, v in row_data.items())
-            
+            import json
+            ctext = json.dumps(row_data)
             metadata = {
                 "component": "nmos_infineon",
                 "type": "table",
